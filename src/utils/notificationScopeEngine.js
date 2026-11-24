@@ -1,0 +1,910 @@
+// src/utils/notificationScopeEngine.js
+// محرك النطاق الهرمي للإشعارات وتصنيف المراحل الكنسية (4-Tier Role-Based Notification Scope Engine)
+import { hydrateServicesWithCurricula } from './curriculumData.js';
+import { resolveOsraLogoUrl } from './realChurchStructure.js';
+import {
+    getAppEdition,
+    isStandaloneEditionBuild,
+    setDemoEditionOverride,
+    applyEditionBrandingToDOM,
+    mapRoleTierToBrandingEdition,
+    readScopedStorage,
+    writeScopedStorage,
+    removeScopedStorage,
+} from './tenantConfig.js';
+
+export const CHURCH_STAGES_ORDER = [
+    'خدام مدارس الأحد',
+    'حضانة / كي جي',
+    'ابتدائي',
+    'إعدادي',
+    'ثانوي',
+    'شباب وجامعة',
+    'اجتماع الخدام العام',
+    'خدمات أخرى'
+];
+
+/**
+ * قراءة بيانات الأسرة التي يتصفحها الكاهن / أمين الخدمة حالياً بوضع "الدخول كخادم للأسرة"
+ * @returns {{ syncKey: string, name: string, serviceName?: string, stageName?: string, logo?: string } | null}
+ */
+export function getImpersonatedOsra() {
+    if (typeof window === 'undefined' || !window.localStorage) return null;
+    try {
+        const rawJson = readScopedStorage('impersonated_osra');
+        if (rawJson) {
+            const parsed = JSON.parse(rawJson);
+            const sk = String(parsed?.syncKey || '').trim();
+            if (sk && sk !== 'MASTER_ACCESS' && sk !== 'ADMIN_MODE' && sk !== 'STAGE_ADMIN') {
+                return {
+                    syncKey: sk,
+                    name: String(parsed?.name || readScopedStorage('assignedOsra') || sk).trim(),
+                    serviceName: parsed?.serviceName || 'الخدمة',
+                    stageName: parsed?.stageName || inferStageFromClass(parsed?.name || sk),
+                    logo: parsed?.logo || ''
+                };
+            }
+        }
+
+        const isLegacyImpersonating = readScopedStorage('isSuperAdminImpersonating') === 'true';
+        if (isLegacyImpersonating) {
+            const sk = String(readScopedStorage('currentSyncKey') || '').trim();
+            if (sk && sk !== 'MASTER_ACCESS' && sk !== 'ADMIN_MODE' && sk !== 'STAGE_ADMIN') {
+                const name = String(readScopedStorage('assignedOsra') || sk).trim();
+                return {
+                    syncKey: sk,
+                    name,
+                    serviceName: 'الخدمة',
+                    stageName: inferStageFromClass(name),
+                    logo: ''
+                };
+            }
+        }
+    } catch (_e) {
+        return null;
+    }
+    return null;
+}
+
+/**
+ * تفعيل وضع "الدخول كخادم للأسرة" لفصل محدد وتحديث الهوية فوراً
+ */
+export function startOsraImpersonation(osra, currentMasterSyncKey = null) {
+    if (typeof window === 'undefined' || !window.localStorage || !osra?.syncKey) return null;
+    const sk = String(osra.syncKey).trim();
+
+    // التحقق من عدم تجاوز أمين المرحلة لحدود مرحلته عند التصفح كخادم
+    const currentScope = resolveUserAccessScope();
+    if (!currentScope.isSuperAdmin && (!currentScope.isStageLeader || !currentScope.allowedSyncKeys.includes(sk))) {
+        return null;
+    }
+
+    const existingMasterKey = readScopedStorage('masterSyncKey');
+    const currentKey = currentMasterSyncKey || readScopedStorage('currentSyncKey') || 'MASTER_ACCESS';
+    if (!existingMasterKey || existingMasterKey === sk) {
+        writeScopedStorage(
+            'masterSyncKey',
+            currentKey && currentKey !== sk ? currentKey : 'MASTER_ACCESS'
+        );
+    }
+
+    const payload = {
+        syncKey: sk,
+        name: String(osra.name || sk).trim(),
+        serviceName: osra.serviceName || 'الخدمة',
+        stageName: osra.stageName || inferStageFromClass(osra),
+        logo: osra.logo || ''
+    };
+
+    writeScopedStorage('impersonated_osra', JSON.stringify(payload));
+    writeScopedStorage('isSuperAdminImpersonating', 'true');
+    writeScopedStorage('currentSyncKey', payload.syncKey);
+    writeScopedStorage('assignedOsra', payload.name);
+    writeScopedStorage('userRole', 'class_servant');
+
+    if (typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new Event('syncKey-changed'));
+        window.dispatchEvent(new Event('auth-changed'));
+    }
+    return payload;
+}
+
+/**
+ * إنهاء وضع "الدخول كخادم للأسرة" والعودة إلى الصلاحية الشاملة (الكاهن / أمين الخدمة / أمين المرحلة)
+ */
+export function exitOsraImpersonation() {
+    if (typeof window === 'undefined' || !window.localStorage) return 'MASTER_ACCESS';
+    const masterKey = readScopedStorage('masterSyncKey') || 'MASTER_ACCESS';
+    writeScopedStorage('currentSyncKey', masterKey);
+    removeScopedStorage('impersonated_osra');
+    removeScopedStorage('isSuperAdminImpersonating');
+    removeScopedStorage('assignedOsra');
+    removeScopedStorage('masterSyncKey');
+
+    // استعادة userRole المتوافق مع الصلاحية الأصلية بعد انتهاء التصفح كخادم
+    const restoredScope = resolveUserAccessScope(null, [], { ignoreImpersonation: true });
+    if (restoredScope?.roleTier && restoredScope.roleTier !== 'guest') {
+        writeScopedStorage('userRole', restoredScope.roleTier);
+    } else {
+        removeScopedStorage('userRole');
+    }
+
+    if (typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new Event('syncKey-changed'));
+        window.dispatchEvent(new Event('auth-changed'));
+    }
+    return masterKey;
+}
+
+/**
+ * تطبيع النص العربي لتسهيل المطابقة الذكية لأسماء الفصول والمراحل
+ */
+function normalizeArabicForMatch(text) {
+    if (!text) return '';
+    return String(text)
+        .trim()
+        .toLowerCase()
+        .replace(/[أإآٱ]/g, 'ا')
+        .replace(/ة/g, 'ه')
+        .replace(/ى/g, 'ي')
+        .replace(/\s+/g, ' ');
+}
+
+/**
+ * استنتاج اسم المرحلة الكنسية بدقة من بيانات الأسرة/الفصل أو اسمها
+ * @param {object|string} osraOrName
+ * @returns {string} اسم المرحلة القياسي
+ */
+export function inferStageFromClass(osraOrName) {
+    if (!osraOrName) return 'خدمات أخرى';
+
+    const rawText = typeof osraOrName === 'string'
+        ? osraOrName
+        : [
+            osraOrName.stage,
+            osraOrName.stageName,
+            osraOrName.name,
+            osraOrName.osraName,
+            osraOrName.serviceName,
+            osraOrName.syncKey
+        ].filter(Boolean).join(' ');
+
+    const norm = normalizeArabicForMatch(rawText);
+    if (!norm) return 'خدمات أخرى';
+
+    // 0. قوائم الخدام المخصصة (تفحص أولاً لمنع الخلط مع فصول المخدومين)
+    if (norm.includes('خدام مدارس الاحد')) {
+        return 'خدام مدارس الأحد';
+    }
+    if (norm.includes('اجتماع الخدام') || norm.includes('الخدام العام')) {
+        return 'اجتماع الخدام العام';
+    }
+
+    // 1. مرحلة الشباب والجامعة (تفحص أولاً لمنع التداخل)
+    if (
+        norm.includes('شباب') ||
+        norm.includes('جامعه') ||
+        norm.includes('خريجين') ||
+        norm.includes('youth')
+    ) {
+        return 'شباب وجامعة';
+    }
+
+    // 2. مرحلة ثانوي (تفحص قبل ابتدائي لأن الفصل قد يسمى "أولى ثانوي" أو "ثانية ثانوي")
+    if (
+        norm.includes('ثانوي') ||
+        norm.includes('sec') ||
+        norm.includes('secondary')
+    ) {
+        return 'ثانوي';
+    }
+
+    // 3. مرحلة إعدادي (تفحص قبل ابتدائي لأن الفصل قد يسمى "أولى إعدادي")
+    if (
+        norm.includes('اعدادي') ||
+        norm.includes('prep')
+    ) {
+        return 'إعدادي';
+    }
+
+    // 4. مرحلة حضانة / كي جي
+    if (
+        norm.includes('كي جي') ||
+        norm.includes('كيجي') ||
+        norm.includes('kg') ||
+        norm.includes('حضانه') ||
+        norm.includes('ملائكه') ||
+        norm.includes('تمهيدي') ||
+        norm.includes('بيبي')
+    ) {
+        return 'حضانة / كي جي';
+    }
+
+    // 5. مرحلة ابتدائي
+    if (
+        norm.includes('ابتدائي') ||
+        norm.includes('اولي') ||
+        norm.includes('ثانيه') ||
+        norm.includes('تانيه') ||
+        norm.includes('ثالثه') ||
+        norm.includes('تالته') ||
+        norm.includes('رابعه') ||
+        norm.includes('خامسه') ||
+        norm.includes('سادسه') ||
+        norm.includes('ساته') ||
+        norm.includes('primary')
+    ) {
+        return 'ابتدائي';
+    }
+
+    return 'خدمات أخرى';
+}
+
+export const DEFAULT_CHURCH_OSRAS = [
+    { syncKey: 'خدام مدارس الأحد', name: 'خدام مدارس الأحد', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'خدام مدارس الأحد', isServantsRoster: true, serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'أمين عام مدارس الأحد' },
+    { syncKey: 'كي جي 1', name: 'حضانة - كي جي 1', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'حضانة / كي جي', serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'تاسوني مريم' },
+    { syncKey: 'كي جي 2', name: 'حضانة - كي جي 2', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'حضانة / كي جي', serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'تاسوني مريم' },
+    { syncKey: 'أولى ابتدائي', name: 'أولى ابتدائي', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'ابتدائي', serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'أ. بيشوي' },
+    { syncKey: 'ثانية ابتدائي', name: 'ثانية ابتدائي', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'ابتدائي', serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'أ. بيشوي' },
+    { syncKey: 'ثالثة ابتدائي', name: 'ثالثة ابتدائي', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'ابتدائي', serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'أ. مارك' },
+    { syncKey: 'رابعة ابتدائي', name: 'رابعة ابتدائي', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'ابتدائي', serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'أ. مارك' },
+    { syncKey: 'خامسة ابتدائي', name: 'خامسة ابتدائي', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'ابتدائي', serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'أ. كيرلس' },
+    { syncKey: 'سادسة ابتدائي', name: 'سادسة ابتدائي', serviceName: 'مجموعة مدارس الأحد', serviceGroup: 'مدارس الأحد', stageName: 'ابتدائي', serviceDays: ['sunday', 'thursday'], liturgyDay: 'friday', amin: 'أ. كيرلس' },
+    { syncKey: 'إعدادي بنين', name: 'إعدادي بنين', serviceName: 'خدمة إعدادي', serviceGroup: 'إعدادي', stageName: 'إعدادي', serviceDays: ['friday'], liturgyDay: 'friday', amin: 'أ. يوسف' },
+    { syncKey: 'إعدادي بنات', name: 'إعدادي بنات', serviceName: 'خدمة إعدادي', serviceGroup: 'إعدادي', stageName: 'إعدادي', serviceDays: ['friday'], liturgyDay: 'friday', amin: 'تاسوني سارة' },
+    { syncKey: 'ثانوي بنين', name: 'ثانوي بنين', serviceName: 'خدمة ثانوي', serviceGroup: 'ثانوي', stageName: 'ثانوي', serviceDays: ['thursday'], liturgyDay: 'friday', amin: 'أ. مينا' },
+    { syncKey: 'ثانوي بنات', name: 'ثانوي بنات', serviceName: 'خدمة ثانوي', serviceGroup: 'ثانوي', stageName: 'ثانوي', serviceDays: ['thursday'], liturgyDay: 'friday', amin: 'تاسوني مارينا' },
+    { syncKey: 'خدمة جامعة', name: 'خدمة الشباب والجامعة', serviceName: 'خدمة جامعة', serviceGroup: 'جامعة', stageName: 'شباب وجامعة', serviceDays: ['monday'], liturgyDay: 'friday', amin: 'د. جورج' },
+    { syncKey: 'اجتماع الخدام العام', name: 'اجتماع الخدام العام', serviceName: 'اجتماع الخدام العام', serviceGroup: 'الخدام', stageName: 'اجتماع الخدام العام', isServantsRoster: true, serviceDays: ['wednesday'], liturgyDay: 'friday', amin: 'أبونا راعي الكنيسة' }
+];
+
+export const DEFAULT_CHURCH_SERVICES = hydrateServicesWithCurricula([
+    {
+        id: 'srv_sunday_school',
+        name: 'مجموعة مدارس الأحد',
+        serviceGroup: 'مدارس الأحد',
+        serviceDays: ['sunday', 'thursday'],
+        liturgyDay: 'friday',
+        scheduleLabel: 'الأحد والخميس • قداس الجمعة',
+        osras: DEFAULT_CHURCH_OSRAS.filter(o => o.serviceName === 'مجموعة مدارس الأحد')
+    },
+    {
+        id: 'srv_prep',
+        name: 'خدمة إعدادي',
+        serviceGroup: 'إعدادي',
+        serviceDays: ['friday'],
+        liturgyDay: 'friday',
+        scheduleLabel: 'الجمعة',
+        osras: DEFAULT_CHURCH_OSRAS.filter(o => o.serviceName === 'خدمة إعدادي')
+    },
+    {
+        id: 'srv_secondary',
+        name: 'خدمة ثانوي',
+        serviceGroup: 'ثانوي',
+        serviceDays: ['thursday'],
+        liturgyDay: 'friday',
+        scheduleLabel: 'الخميس',
+        osras: DEFAULT_CHURCH_OSRAS.filter(o => o.serviceName === 'خدمة ثانوي')
+    },
+    {
+        id: 'srv_university',
+        name: 'خدمة جامعة',
+        serviceGroup: 'جامعة',
+        serviceDays: ['monday'],
+        liturgyDay: 'friday',
+        scheduleLabel: 'الاثنين',
+        osras: DEFAULT_CHURCH_OSRAS.filter(o => o.serviceName === 'خدمة جامعة')
+    },
+    {
+        id: 'srv_general_servants',
+        name: 'اجتماع الخدام العام',
+        serviceGroup: 'الخدام',
+        serviceDays: ['wednesday'],
+        liturgyDay: 'friday',
+        scheduleLabel: 'الأربعاء',
+        osras: DEFAULT_CHURCH_OSRAS.filter(o => o.serviceName === 'اجتماع الخدام العام')
+    }
+], { seedDefaults: true });
+
+/**
+ * استخراج جميع الفصول/الأسر من إعدادات النظام مع إثرائها بالمرحلة الكنسية المستنتجة
+ * @param {object} [appSettingsInput]
+ * @param {string[]} [extraSyncKeys]
+ * @param {object} [options]
+ * @returns {Array<{syncKey: string, name: string, serviceName: string, stageName: string, logo?: string}>}
+ */
+export function extractAllOsrasFromSettings(appSettingsInput = null, extraSyncKeys = [], options = {}) {
+    let settings = appSettingsInput;
+    if (!settings && typeof window !== 'undefined') {
+        try {
+            settings = JSON.parse(readScopedStorage('appSettings') || '{}');
+        } catch (_e) {
+            settings = {};
+        }
+    }
+    settings = settings || {};
+
+    const osraMap = new Map();
+    const services = Array.isArray(settings.services) ? settings.services : [];
+
+    for (const service of services) {
+        const serviceName = service?.name || 'الخدمة';
+        const osras = Array.isArray(service?.osras) ? service.osras : [];
+        for (const osra of osras) {
+            const sk = String(osra?.syncKey || '').trim();
+            if (!sk || sk === 'MASTER_ACCESS' || sk === 'ADMIN_MODE' || sk === 'STAGE_ADMIN') continue;
+            const stageName = inferStageFromClass({ ...osra, serviceName });
+            osraMap.set(sk, {
+                ...osra,
+                syncKey: sk,
+                name: osra.name || sk,
+                serviceName,
+                serviceId: service.id,
+                stageName,
+                logo: resolveOsraLogoUrl(osra, service, '')
+            });
+        }
+    }
+
+    // تضمين أي فصول إضافية موجودة في قاعدة البيانات المحلية ولم ترد في الإعدادات
+    if (Array.isArray(extraSyncKeys)) {
+        for (const rawKey of extraSyncKeys) {
+            const sk = String(rawKey || '').trim();
+            if (!sk || sk === 'MASTER_ACCESS' || sk === 'ADMIN_MODE' || sk === 'STAGE_ADMIN' || sk === 'all') continue;
+            if (!osraMap.has(sk)) {
+                osraMap.set(sk, {
+                    syncKey: sk,
+                    name: sk,
+                    serviceName: 'الخدمة',
+                    stageName: inferStageFromClass(sk),
+                    logo: ''
+                });
+            }
+        }
+    }
+
+    // توفير الفصول الافتراضية للواجهة فقط عندما لا يكون هناك هيكل محمل بعد في المتصفح
+    if (osraMap.size === 0 && options?.includeFallback && !Array.isArray(settings.services)) {
+        for (const fallbackOsra of DEFAULT_CHURCH_OSRAS) {
+            osraMap.set(fallbackOsra.syncKey, { ...fallbackOsra, logo: '' });
+        }
+    }
+
+    return Array.from(osraMap.values());
+}
+
+/**
+ * تحديد المستوى الهرمي الدقيق للخادم ونطاق الإشعارات المسموح له
+ * المستويات الـ 4:
+ * 1. class_servant: خادم فصل (أو أمين أسرة فصل واحد) -> إشعارات فصله + إعلانات مرحلته
+ * 2. stage_servant: خادم مرحلة (أو مسؤول عن عدة فصول في المرحلة) -> إشعارات فصول مرحلته
+ * 3. stage_leader_detailed: أمين مرحلة -> إشعارات مفصلة لكل فصل في مرحلته
+ * 4. master_detailed: أمين الخدمة العام / الأب الكاهن / Super Admin -> إشعارات مفصلة شاملة لكل مراحل وفصول الكنيسة
+ *
+ * @param {object} [currentServantInput]
+ * @param {Array} [allOsrasInput]
+ * @param {string} [currentSyncKeyOverride]
+ */
+export function resolveServantNotificationScope(
+    currentServantInput = null,
+    allOsrasInput = null,
+    currentSyncKeyOverride = null,
+    options = {}
+) {
+    let servant = currentServantInput;
+    if (!servant && typeof window !== 'undefined') {
+        try {
+            servant = JSON.parse(readScopedStorage('currentServant') || '{}');
+        } catch (_e) {
+            servant = {};
+        }
+    }
+    servant = servant || {};
+
+    const impersonatedOsra = !options?.ignoreImpersonation ? getImpersonatedOsra() : null;
+    const isImpersonating = Boolean(impersonatedOsra?.syncKey);
+
+    const rawSyncKey = isImpersonating
+        ? impersonatedOsra.syncKey
+        : (currentSyncKeyOverride ?? (typeof window !== 'undefined' ? readScopedStorage('currentSyncKey') : '') ?? '');
+    const currentSyncKey = String(rawSyncKey || servant.syncKey || '').trim();
+    const assignedOsraName = isImpersonating
+        ? (impersonatedOsra.name || '')
+        : ((typeof window !== 'undefined' ? readScopedStorage('assignedOsra') : '') || servant.assignedOsra || servant.osraName || '');
+
+    const allOsras = Array.isArray(allOsrasInput) && allOsrasInput.length > 0
+        ? allOsrasInput.map(o => ({
+            ...o,
+            syncKey: String(o.syncKey || '').trim(),
+            name: o.name || String(o.syncKey || '').trim(),
+            stageName: o.stageName || inferStageFromClass(o)
+        }))
+        : extractAllOsrasFromSettings();
+
+    const osraMapBySyncKey = new Map();
+    const osrasByStage = new Map();
+
+    for (const stage of CHURCH_STAGES_ORDER) {
+        osrasByStage.set(stage, []);
+    }
+
+    for (const osra of allOsras) {
+        if (!osra.syncKey) continue;
+        osraMapBySyncKey.set(osra.syncKey, osra);
+        const stg = osra.stageName || inferStageFromClass(osra);
+        if (!osrasByStage.has(stg)) {
+            osrasByStage.set(stg, []);
+        }
+        osrasByStage.get(stg).push(osra);
+    }
+
+    if (isImpersonating && !osraMapBySyncKey.has(impersonatedOsra.syncKey)) {
+        const enrichedImp = {
+            ...impersonatedOsra,
+            stageName: impersonatedOsra.stageName || inferStageFromClass(impersonatedOsra)
+        };
+        osraMapBySyncKey.set(impersonatedOsra.syncKey, enrichedImp);
+    }
+
+    const roleRaw = String(servant.role || '').trim();
+    const roleNorm = normalizeArabicForMatch(roleRaw).replace(/الخدمه/g, 'خدمه').replace(/المرحله/g, 'مرحله');
+    const allowedClassesRaw = Array.isArray(servant.allowedClasses)
+        ? servant.allowedClasses.map(k => String(k || '').trim()).filter(Boolean)
+        : [];
+
+    // فحص المستوى الرابع: أمين الخدمة العام / الأب الكاهن / Super Admin
+    const isMasterSyncKey = currentSyncKey === 'MASTER_ACCESS' || currentSyncKey === 'ADMIN_MODE';
+    const isMasterRole =
+        roleNorm.includes('كاهن') ||
+        roleNorm.includes('ابونا') ||
+        roleNorm.includes('امين خدمه') ||
+        roleNorm.includes('امين عام') ||
+        roleNorm.includes('ادمن مساعد') ||
+        roleNorm.includes('super admin') ||
+        roleNorm.includes('super_admin') ||
+        roleNorm.includes('master');
+
+    // فحص المستوى الثالث: أمين مرحلة
+    const isStageLeaderRole =
+        currentSyncKey === 'STAGE_ADMIN' ||
+        roleNorm === 'stage_admin' ||
+        roleNorm.includes('امين مرحله') ||
+        roleNorm.includes('أمين مرحلة');
+
+    // فحص المستوى الثاني: خادم مرحلة أو خادم له عدة فصول في نفس المرحلة
+    const isStageServantRole =
+        roleNorm === 'data_entry' ||
+        roleNorm.includes('خادم مرحله') ||
+        (!isMasterSyncKey && !isMasterRole && !isStageLeaderRole && allowedClassesRaw.length > 1);
+
+    let tier = 'class_servant';
+    if (isImpersonating) {
+        // عند تفعيل "الدخول كخادم للأسرة"، يتحول النطاق النشط إلى خادم فصل واحد لهذا الفصل تحديداً
+        tier = 'class_servant';
+    } else if (isMasterSyncKey || isMasterRole) {
+        tier = 'master_detailed';
+    } else if (isStageLeaderRole) {
+        tier = 'stage_leader_detailed';
+    } else if (isStageServantRole) {
+        tier = 'stage_servant';
+    }
+
+    // تحديد الفصل الأساسي للخادم (إن وجد)
+    const isSpecialSyncKey =
+        !currentSyncKey ||
+        currentSyncKey === 'MASTER_ACCESS' ||
+        currentSyncKey === 'ADMIN_MODE' ||
+        currentSyncKey === 'STAGE_ADMIN';
+
+    const primarySyncKey = isImpersonating
+        ? impersonatedOsra.syncKey
+        : (!isSpecialSyncKey
+            ? currentSyncKey
+            : (allowedClassesRaw[0] || String(servant.syncKey || '').trim() || ''));
+
+    const primaryOsraObj = osraMapBySyncKey.get(primarySyncKey) || (isImpersonating ? impersonatedOsra : null);
+    const primaryClassName = primaryOsraObj?.name || assignedOsraName || primarySyncKey || 'الفصل';
+
+    // تحديد اسم المرحلة للخادم
+    const rawExplicitStage = String(servant.stageName || servant.stage || '').trim();
+    const isSundaySchoolGroup =
+        normalizeArabicForMatch(rawExplicitStage).includes('مدارس الاحد') ||
+        (Array.isArray(servant.assignedStages) && servant.assignedStages.some(s => normalizeArabicForMatch(String(s)).includes('مدارس الاحد')));
+
+    let stageName = 'خدمات أخرى';
+    if (isImpersonating) {
+        stageName = primaryOsraObj?.stageName || inferStageFromClass(primaryOsraObj || primaryClassName);
+    } else if (tier === 'master_detailed') {
+        stageName = 'كل مراحل الكنيسة';
+    } else if (isSundaySchoolGroup) {
+        stageName = 'مجموعة مدارس الأحد';
+    } else if (rawExplicitStage) {
+        stageName = inferStageFromClass(rawExplicitStage);
+    } else if (allowedClassesRaw.length > 0) {
+        const firstAllowedOsra = osraMapBySyncKey.get(allowedClassesRaw[0]);
+        stageName = inferStageFromClass(firstAllowedOsra || allowedClassesRaw[0]);
+    } else if (primaryOsraObj) {
+        stageName = primaryOsraObj.stageName || inferStageFromClass(primaryOsraObj);
+    } else if (primaryClassName) {
+        stageName = inferStageFromClass(primaryClassName);
+    }
+
+    // تحديد فصول المرحلة (stageSyncKeys)
+    const stageOsras = isSundaySchoolGroup
+        ? allOsras.filter(o =>
+            normalizeArabicForMatch(o.serviceName).includes('مدارس الاحد') ||
+            ['خدام مدارس الأحد', 'حضانة / كي جي', 'ابتدائي'].includes(o.stageName)
+        )
+        : (osrasByStage.get(stageName) || []);
+    const assignedStages = Array.isArray(servant.assignedStages) ? servant.assignedStages.map(String) : [];
+    const assignedStageKeys = allOsras.filter(o => assignedStages.includes('all') || [o.stageId, o.serviceId, o.stageName, o.serviceName].some(v => v != null && assignedStages.includes(String(v)))).map(o => o.syncKey);
+    const inferredStageKeys = assignedStages.length ? assignedStageKeys : stageOsras.map(o => o.syncKey);
+
+    let stageSyncKeys = [];
+    if (isImpersonating) {
+        stageSyncKeys = stageOsras.length > 0 ? stageOsras.map(o => o.syncKey) : [primarySyncKey];
+    } else if (tier === 'master_detailed') {
+        stageSyncKeys = Array.from(osraMapBySyncKey.keys());
+    } else if (assignedStages.length > 0) {
+        stageSyncKeys = assignedStageKeys;
+    } else if (allowedClassesRaw.length > 0) {
+        stageSyncKeys = Array.from(new Set([...allowedClassesRaw, ...inferredStageKeys]));
+    } else {
+        stageSyncKeys = inferredStageKeys.length > 0
+            ? inferredStageKeys
+            : (primarySyncKey ? [primarySyncKey] : []);
+    }
+
+    // تحديد الفصول المسموح للخادم برؤية بياناتها (allowedSyncKeys)
+    let allowedSyncKeys = [];
+    if (isImpersonating) {
+        allowedSyncKeys = [primarySyncKey];
+    } else if (tier === 'master_detailed') {
+        allowedSyncKeys = Array.from(osraMapBySyncKey.keys());
+    } else if (tier === 'stage_leader_detailed' || tier === 'stage_servant') {
+        allowedSyncKeys = allowedClassesRaw.length > 0 ? allowedClassesRaw : stageSyncKeys;
+        if (allowedSyncKeys.length === 0 && primarySyncKey && assignedStages.length === 0) {
+            allowedSyncKeys = [primarySyncKey];
+        }
+    } else {
+        // خادم الفصل: يرى فصله الأساسي فقط في الإحصائيات التفصيلية، مع استقبال إعلانات مرحلته
+        allowedSyncKeys = primarySyncKey ? [primarySyncKey] : [];
+    }
+
+    // مسميات العرض الواضحة لكل مستوى
+    let roleTitle = roleRaw || 'خادم';
+    let tierLabel = '';
+    if (isImpersonating) {
+        roleTitle = `تصفح كخادم — ${primaryClassName}`;
+        tierLabel = `وضع تصفح أسرة: ${primaryClassName} (مرحلة ${stageName})`;
+    } else if (tier === 'master_detailed') {
+        if (roleNorm.includes('كاهن') || roleNorm.includes('ابونا')) {
+            roleTitle = 'الأب الكاهن';
+            tierLabel = 'الأب الكاهن (تفصيل شامل لكل المراحل والفصول)';
+        } else {
+            roleTitle = roleRaw || 'أمين الخدمة العام';
+            tierLabel = `${roleTitle} (تفصيل شامل لكل المراحل والفصول)`;
+        }
+    } else if (tier === 'stage_leader_detailed') {
+        roleTitle = roleRaw || 'أمين مرحلة';
+        tierLabel = `أمين مرحلة ${stageName} (تقرير مفصل لفصول المرحلة)`;
+    } else if (tier === 'stage_servant') {
+        roleTitle = roleRaw || 'خادم مرحلة';
+        tierLabel = `خادم مرحلة ${stageName} (${allowedSyncKeys.length} فصول)`;
+    } else {
+        roleTitle = roleRaw || 'خادم فصل';
+        tierLabel = `${roleTitle} — ${primaryClassName} (مرحلة ${stageName})`;
+    }
+
+    const canBroadcast =
+        isMasterRole ||
+        tier === 'master_detailed' ||
+        tier === 'stage_leader_detailed' ||
+        roleNorm.includes('امين اسره') ||
+        roleNorm.includes('أمين أسرة');
+
+    return {
+        tier,
+        tierLabel,
+        roleTitle,
+        servantName: servant.name || roleTitle,
+        servantPhone: servant.phone || '',
+        primarySyncKey,
+        primaryClassName,
+        stageName,
+        stageSyncKeys,
+        allowedSyncKeys,
+        canBroadcast,
+        isImpersonating,
+        impersonatedOsra: isImpersonating ? (primaryOsraObj || impersonatedOsra) : null,
+        allOsras,
+        osraMapBySyncKey,
+        osrasByStage
+    };
+}
+
+/**
+ * التحقق مما إذا كان إشعار البث الموجه (Broadcast) يخص نطاق هذا الخادم
+ */
+export function doesBroadcastMatchScope(broadcast, scope) {
+    if (!broadcast || !scope) return false;
+    if (scope.tier === 'master_detailed') return true;
+
+    const targetType = broadcast.targetType || 'all';
+    const targetValue = String(broadcast.targetValue || '').trim();
+
+    if (targetType === 'all') return true;
+
+    if (targetType === 'stage') {
+        const normTarget = normalizeArabicForMatch(targetValue);
+        const normMyStage = normalizeArabicForMatch(scope.stageName);
+        return normTarget === normMyStage || targetValue === scope.stageName;
+    }
+
+    if (targetType === 'class') {
+        return (
+            targetValue === scope.primarySyncKey ||
+            (Array.isArray(scope.allowedSyncKeys) && scope.allowedSyncKeys.includes(targetValue))
+        );
+    }
+
+    return false;
+}
+
+function safeReadStorage(key) {
+    try {
+        const localVal = readScopedStorage(key);
+        if (localVal != null && localVal !== '') return String(localVal);
+        const ss = typeof window !== 'undefined' ? window?.sessionStorage : globalThis?.sessionStorage;
+        const sessVal = ss?.getItem?.(key);
+        if (sessVal != null && sessVal !== '') return String(sessVal);
+    } catch (_e) {
+        return '';
+    }
+    return '';
+}
+
+function safeParseJson(raw) {
+    if (!raw || typeof raw !== 'string') return null;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_e) {
+        return null;
+    }
+}
+
+function buildGuestAccessScope(allOsras = []) {
+    return {
+        roleTier: 'guest',
+        tier: 'guest',
+        tierLabel: 'غير مسجل',
+        roleTitle: 'زائر',
+        servantName: '',
+        servantPhone: '',
+        isSuperAdmin: false,
+        isStageLeader: false,
+        isClassServant: false,
+        isParent: false,
+        isGuest: true,
+        isImpersonating: false,
+        impersonatedOsra: null,
+        stageName: '',
+        activeSyncKey: '',
+        primarySyncKey: '',
+        primaryClassName: '',
+        allowedSyncKeys: [],
+        allowedOsras: [],
+        stageSyncKeys: [],
+        allOsras,
+        parentChildId: '',
+        parentSession: null,
+        canAccessSystemAdmin: false,
+        canAccessMasterDashboard: false,
+        canSwitchClasses: false,
+        canBroadcast: false
+    };
+}
+
+/**
+ * المحرك المركزي الموحد لتحديد المستوى الهرمي وصلاحيات الوصول عبر كل صفحات التطبيق ومساراته:
+ * 1. super_admin: الأب الكاهن / أمين الخدمة العام (وصول شامل 100%)
+ * 2. stage_leader: أمين المرحلة (مقيد بفصول مرحلته فقط، بدون #/admin)
+ * 3. class_servant: خادم الفصل أو وضع التصفح كخادم لفصل (مقيد بفصل واحد فقط)
+ * 4. parent: ولي الأمر (مقيد ببوابة ولي الأمر وطفله فقط)
+ */
+export function resolveUserAccessScope(appSettings = null, extraSyncKeys = [], options = {}) {
+    const allOsras = extractAllOsrasFromSettings(appSettings, extraSyncKeys, options);
+    const appEdition = options?.ignoreEditionLock ? 'all' : getAppEdition();
+    const userRoleRaw = safeReadStorage('userRole').trim();
+    const userRoleNorm = normalizeArabicForMatch(userRoleRaw);
+    const rawParentChildId = safeReadStorage('parentChildId').trim();
+    const parsedParentSession = safeParseJson(safeReadStorage('parentSession'));
+    const parentChildId = rawParentChildId || String(parsedParentSession?.childId || parsedParentSession?.id || '').trim();
+    const rawCurrentSyncKey = safeReadStorage('currentSyncKey').trim();
+    const parsedServantSession = safeParseJson(safeReadStorage('currentServant')) || safeParseJson(safeReadStorage('servantSession')) || {};
+    const selectedOsraRaw = safeReadStorage('selectedOsra').trim();
+
+    const explicitParentRole =
+        userRoleNorm === 'parent' ||
+        userRoleNorm === 'ولي امر' ||
+        userRoleNorm === 'guardian';
+
+    if (!options?.ignoreParent && (explicitParentRole || (Boolean(parentChildId) && !rawCurrentSyncKey))) {
+        if (appEdition === 'admin' || appEdition === 'servant') {
+            return buildGuestAccessScope(allOsras);
+        }
+        return {
+            roleTier: 'parent',
+            tier: 'parent',
+            tierLabel: 'بوابة ولي الأمر',
+            roleTitle: 'ولي الأمر',
+            servantName: parsedParentSession?.childName || 'ولي الأمر',
+            servantPhone: parsedParentSession?.fatherPhone || '',
+            isSuperAdmin: false,
+            isStageLeader: false,
+            isClassServant: false,
+            isParent: true,
+            isGuest: false,
+            isImpersonating: false,
+            impersonatedOsra: null,
+            stageName: 'بوابة ولي الأمر',
+            activeSyncKey: '',
+            primarySyncKey: '',
+            primaryClassName: '',
+            allowedSyncKeys: [],
+            allowedOsras: [],
+            stageSyncKeys: [],
+            allOsras,
+            parentChildId,
+            parentSession: parsedParentSession,
+            canAccessSystemAdmin: false,
+            canAccessMasterDashboard: false,
+            canSwitchClasses: false,
+            canBroadcast: false
+        };
+    }
+
+    if (appEdition === 'parent') {
+        return buildGuestAccessScope(allOsras);
+    }
+
+    const impersonatedOsra = !options?.ignoreImpersonation ? getImpersonatedOsra() : null;
+    const servantObj = { ...parsedServantSession };
+    let currentSyncKeyOverride = options?.currentSyncKeyOverride ?? (rawCurrentSyncKey || selectedOsraRaw || '');
+
+    if (!servantObj.role && userRoleNorm && !impersonatedOsra) {
+        if (userRoleNorm === 'super_admin' || userRoleNorm === 'master_detailed') {
+            servantObj.role = 'super_admin';
+            if (!currentSyncKeyOverride) currentSyncKeyOverride = 'MASTER_ACCESS';
+        } else if (userRoleNorm === 'stage_leader' || userRoleNorm === 'stage_leader_detailed' || userRoleNorm === 'stage_admin') {
+            servantObj.role = 'stage_admin';
+            if (!currentSyncKeyOverride) currentSyncKeyOverride = 'STAGE_ADMIN';
+        } else if (userRoleNorm === 'class_servant') {
+            servantObj.role = 'خادم';
+        }
+    }
+
+    const hasServantAuth = Boolean(
+        impersonatedOsra?.syncKey ||
+        currentSyncKeyOverride ||
+        servantObj?.syncKey ||
+        servantObj?.role ||
+        (Array.isArray(servantObj?.allowedClasses) && servantObj.allowedClasses.length > 0)
+    );
+
+    if (!hasServantAuth) {
+        return buildGuestAccessScope(allOsras);
+    }
+
+    const scope = resolveServantNotificationScope(servantObj, allOsras, currentSyncKeyOverride || null, options);
+    const allowedSet = new Set(scope.allowedSyncKeys || []);
+    const allowedOsras = scope.allOsras.filter(o => allowedSet.has(o.syncKey));
+
+    let roleTier = 'class_servant';
+    if (scope.isImpersonating) {
+        roleTier = 'class_servant';
+    } else if (scope.tier === 'master_detailed') {
+        roleTier = 'super_admin';
+    } else if (scope.tier === 'stage_leader_detailed') {
+        roleTier = 'stage_leader';
+    }
+
+    if (appEdition === 'admin' && roleTier === 'class_servant' && !scope.isImpersonating) {
+        return buildGuestAccessScope(allOsras);
+    }
+    if (appEdition === 'servant' && (roleTier === 'super_admin' || roleTier === 'stage_leader')) {
+        return buildGuestAccessScope(allOsras);
+    }
+
+    const isSuperAdmin = roleTier === 'super_admin';
+    const isStageLeader = roleTier === 'stage_leader';
+    const isClassServant = roleTier === 'class_servant';
+    const activeSyncKey = isClassServant ? (scope.primarySyncKey || scope.allowedSyncKeys[0] || '') : '';
+    const canSwitchClasses = isSuperAdmin || ((isStageLeader || scope.tier === 'stage_servant') && scope.allowedSyncKeys.length > 1);
+
+    return {
+        ...scope,
+        roleTier,
+        isSuperAdmin,
+        isStageLeader,
+        isClassServant,
+        isParent: false,
+        isGuest: false,
+        activeSyncKey,
+        allowedOsras,
+        parentChildId: '',
+        parentSession: null,
+        canAccessSystemAdmin: appEdition !== 'servant' && isSuperAdmin,
+        canAccessMasterDashboard: appEdition !== 'servant' && (isSuperAdmin || isStageLeader),
+        canSwitchClasses
+    };
+}
+
+const EDITION_PARENT_STORAGE_KEYS = [
+    'parentChildId',
+    'parentChildName',
+    'parentSyncKey',
+    'parentClassName',
+    'parentSession',
+];
+
+const EDITION_SERVANT_STORAGE_KEYS = [
+    'currentSyncKey',
+    'currentServant',
+    'assignedOsra',
+    'servantSession',
+    'impersonated_osra',
+    'isSuperAdminImpersonating',
+    'masterSyncKey',
+    'selectedOsra',
+];
+
+/**
+ * تبديل نسخة التطبيق المعاينة في وضع العرض التجريبي الشامل مع تنظيف أي جلسة غير متوافقة وتوجيه المستخدم
+ */
+export function switchPreviewAppEdition(targetEditionId, navigate) {
+    if (isStandaloneEditionBuild()) return getAppEdition();
+
+    const target = setDemoEditionOverride(targetEditionId);
+    const currentScope = resolveUserAccessScope(null, [], { includeFallback: true, ignoreEditionLock: true });
+
+    if (typeof window !== 'undefined' && window.localStorage) {
+        if (target === 'parent') {
+            EDITION_SERVANT_STORAGE_KEYS.forEach((k) => removeScopedStorage(k));
+            if (!currentScope.isParent) {
+                removeScopedStorage('userRole');
+                EDITION_PARENT_STORAGE_KEYS.forEach((k) => removeScopedStorage(k));
+            }
+        } else if (target === 'admin' || target === 'servant') {
+            EDITION_PARENT_STORAGE_KEYS.forEach((k) => removeScopedStorage(k));
+            const roleEdition = mapRoleTierToBrandingEdition(currentScope.roleTier);
+            if (roleEdition !== target && !(target === 'admin' && currentScope.isImpersonating)) {
+                EDITION_SERVANT_STORAGE_KEYS.forEach((k) => removeScopedStorage(k));
+                removeScopedStorage('userRole');
+            }
+        }
+    }
+
+    applyEditionBrandingToDOM();
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new Event('syncKey-changed'));
+        window.dispatchEvent(new Event('auth-changed'));
+    }
+
+    if (typeof navigate === 'function') {
+        if (target === 'parent') {
+            const afterScope = resolveUserAccessScope(null, [], { includeFallback: true });
+            navigate(afterScope.isParent ? '/parent-dashboard' : '/parent-login', { replace: true });
+        } else {
+            const afterScope = resolveUserAccessScope(null, [], { includeFallback: true });
+            if (!afterScope.isGuest && !afterScope.isParent) {
+                navigate('/', { replace: true });
+            } else {
+                navigate('/login', { replace: true });
+            }
+        }
+    }
+
+    return target;
+}

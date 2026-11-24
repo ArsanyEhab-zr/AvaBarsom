@@ -1,0 +1,1132 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model & Security Architecture
+// ===============================================================
+//
+// Project: avabarsoom-a869d (Firestore Native Standard Edition)
+//
+// Client Authentication Model:
+//   This application authenticates servants, admins, and parents using a
+//   custom Church PIN + syncKey stored in System/mainConfig. It does NOT sign
+//   in with Firebase Authentication, so request.auth is null on client requests.
+//   Therefore, rules MUST NOT require request.auth != null on active app paths.
+//   Instead, security is enforced through:
+//     1. Default-deny root catch-all and strict path allowlisting.
+//     2. Strict field allowlisting (hasOnlyAllowedFields) and type/range/size
+//        validation via domain validators on BOTH create and update.
+//     3. Server-side soft-delete tombstone / zombie resurrection prevention on
+//        Osras/{syncKey}/children and Osras/{syncKey}/childIdentities.
+//     4. Oversized raw Base64 blob and raw PDF guards across media/payload fields.
+//     5. Immutable audit log enforcement (activityLogs) and pending-only
+//        JoinRequests creation.
+//
+// Collection Paths & Schemas:
+//
+// 1. /System/{docId} (docId in ['mainConfig', 'AppConfig', 'broadcastNotifications', 'broadcastMessages'])
+//    - mainConfig: services (list <= 100), servants (list <= 500),
+//      authorizedServants (list <= 500), updatedAt (optional),
+//      plus optional legacy branding/config fields (khedmaName, osraName, osraLogo,
+//      khedmaLogo, secretPass, deletePass, adminPass, appUrl).
+//    - AppConfig: latestVersion (string), updateLink (url/empty), minVersion (optional),
+//      forceUpdate (optional bool), releaseNotes (optional string), updatedAt (optional).
+//    - broadcastNotifications: items (list <= 50), updatedAt (optional).
+//    - broadcastMessages: items (list <= 100), updatedAt (optional).
+//    - Delete denied on all /System docs.
+//
+// 1b. /System/mainConfig/broadcastMessages/{messageId}
+//    - Church-wide and stage-wide broadcast messages subcollection validated via
+//      isValidMessageDocument (same allowlisted fields including optional
+//      senderDeviceId <= 120, encrypted payload support, and soft-delete
+//      tombstones with isDeleted == true, deletedAt & updatedAt as
+//      /Osras/{syncKey}/messages/{messageId}).
+//    - Read, create, update, and delete allowed with valid messageId.
+//
+// 2. /Osras/{syncKey}/children/{childId}
+//    /Osras/{syncKey}/childIdentities/{identityId}
+//    - Also exposed via collectionGroup('children') read rule.
+//    - Encrypted envelope: { payload (string <= 250000), updatedAt (optional),
+//      isDeleted (optional bool), deletedAt (optional number|null),
+//      deletedBy (optional string|null), restoredAt (optional number|null),
+//      restoredBy (optional string|null) }.
+//    - OR legacy direct child fields with bounded strings/lists and safe
+//      profilePic/image/photo (never raw PDF, no oversized Base64).
+//    - Zombie Resurrection Block: Once isDeleted == true, updates cannot remove
+//      isDeleted or set isDeleted == false unless restoredAt is a number strictly
+//      greater than deletedAt (or > 0 if deletedAt is null/absent).
+//    - Delete denied (allow delete: if false) to preserve authoritative tombstones.
+//
+// 3. /Osras/{syncKey}/attendance/{attendanceId}
+//    - Encrypted envelope (payload <= 100000 + optional lifecycle fields) or
+//      direct attendance fields (childId/childCloudId, date, type, status,
+//      optional multi-session fields sessionKey/sessionLabel/timestamp/updatedAtMs,
+//      visitationType, visitationLabel, note, notes, recordedBy, etc.).
+//    - Delete allowed for cross-class child transfer cleanup.
+//
+// 3b. /Osras/{syncKey}/visitations/{visitationId}
+//    - Encrypted envelope (payload <= 100000 + optional updatedAt/isDeleted) or
+//      direct visitation fields (childId/childCloudId required, date required,
+//      id, cloudId, childName, type, status, visitationType, visitationLabel,
+//      note, notes, recordedBy, syncKey, updatedAt, createdAt, isDirty, isDeleted).
+//    - Delete allowed.
+//
+// 4. /Osras/{syncKey}/events/{eventId} (also collectionGroup('events') read)
+//    - Encrypted envelope (payload <= 150000 + optional updatedAt/isDeleted) or
+//      direct event fields (title, date, price, tasks <= 200, isGlobal, etc.).
+//    - Delete allowed.
+//
+// 5. /Osras/{syncKey}/activities/{activityId} (also collectionGroup('activities') read)
+//    - Encrypted envelope (payload <= 100000 + optional updatedAt/isDeleted) or
+//      direct activity fields (id, syncKey, text, type, date, etc.).
+//    - Delete allowed.
+//
+// 6. /Osras/{syncKey}/exams/{examId} (also collectionGroup('exams') read)
+//    - Direct fields: examName (required string), maxGrade (required number >= 1),
+//      date (required string), syncKey (required string), id, firebaseId,
+//      category, createdBy, recordedBy, notes, updatedAt, createdAt, isDeleted;
+//      or encrypted envelope (payload <= 100000).
+//    - Delete allowed.
+//
+// 7. /Osras/{syncKey}/exams/{examId}/grades/{gradeId}
+//    - Encrypted envelope (payload <= 50000 + optional updatedAt/isDeleted) or
+//      direct grade fields (childId, grade >= 0, examId, examName, category,
+//      maxGrade, date, note, notes, recordedBy, createdBy, syncKey).
+//    - Delete allowed.
+//
+// 8. /Osras/{syncKey}/pointsLogs/{pointId}
+//    - Encrypted envelope (payload <= 50000, updatedAt, isDeleted, optional deletedAt/restoredAt)
+//      or direct pointsLog fields (id, childId, syncKey, date, monthKey, points,
+//      awardedBy, recordedBy, createdBy, notes, etc.).
+//    - Delete allowed.
+//
+// 9. /Osras/{syncKey}/curricula/{curriculumId}
+//    - Direct fields: id, title (required unless isDeleted == true), syncKey
+//      (required string), fileUrl (https://, relative /..., or empty string -
+//      NEVER raw Base64 PDF), cloudinaryPublicId, notes, recordedBy, createdBy,
+//      month, weekDate, optional coptic_book_plan fields (trackId <= 120,
+//      trackName <= 200, partNumber 1..10, partLabel <= 150, totalPages,
+//      copticMonths <= 20, lessons <= 120), optional PDF compression size
+//      metadata (originalFileSize, compressedFileSize), plus optional
+//      curriculum metadata; or encrypted envelope (payload <= 100000).
+//    - Delete allowed.
+//
+// 9b. /Osras/{syncKey}/messages/{messageId} (also collectionGroup('messages') read)
+//    - Encrypted envelope (payload <= 100000 + optional updatedAt/isDeleted/deletedAt)
+//      or direct allowlisted message fields (id, syncKey, targetType, targetScope,
+//      scopeKind, targetSyncKey, targetStage, stageName, targetLabel, title <= 300,
+//      body <= 8000, safe imageUrl <= 180KB/URL, http(s)/empty videoUrl & linkUrl <= 2048,
+//      linkLabel, linkTitle, senderName, senderRole, senderPhone,
+//      senderDeviceId <= 120, createdAt, updatedAt, isDirty, isDeleted, deletedAt),
+//      including soft-delete tombstones where isDeleted == true with deletedAt & updatedAt.
+//    - Delete allowed.
+//
+// 10. /servants/{servantId}
+//     - Servant directory profile fields (name required, phone, role, assignedOsra,
+//       syncKey, allowedClasses, assignedStages, photoURL/profileImage/profilePic
+//       bounded and never raw PDF, createdAt immutable on update).
+//     - Delete denied.
+//
+// 11. /ServantAttendance/{docId}
+//     - Weekly servant check-in / evaluation (uid, weekDate YYYY-MM-DD, attendance in
+//       ['حضور', 'غياب', 'اعتذار', ''], booleans, bounded text notes, safe profileImage).
+//     - Delete allowed.
+//
+// 12. /JoinRequests/{requestId}
+//     - Create only with status == 'pending' and createdAt == request.time.
+//     - Update denied; delete allowed for admin approve/reject cleanup.
+//
+// 13. /activityLogs/{logId}
+//     - Append-only audit log: create requires servantName, actionType, details,
+//       dateKey (YYYY-MM-DD), clientTimestamp, and timestamp == request.time.
+//     - Update and delete denied.
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidPathId(id) {
+      return id is string && id.size() > 0 && id.size() <= 512;
+    }
+
+    function isValidSyncKey(syncKey) {
+      return syncKey is string &&
+        syncKey.size() > 0 &&
+        syncKey.size() <= 150 &&
+        !(syncKey in ['MASTER_ACCESS', 'ADMIN_MODE', 'STAGE_ADMIN']);
+    }
+
+    function isValidOptionalString(data, field, maxLen) {
+      return !(field in data) ||
+        (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isValidOptionalNullableString(data, field, maxLen) {
+      return !(field in data) ||
+        data[field] == null ||
+        (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isValidOptionalBool(data, field) {
+      return !(field in data) || data[field] is bool;
+    }
+
+    function isValidOptionalNumber(data, field) {
+      return !(field in data) || data[field] is number;
+    }
+
+    function isValidOptionalNullableNumber(data, field) {
+      return !(field in data) || data[field] == null || data[field] is number;
+    }
+
+    function isValidOptionalIdValue(data, field) {
+      return !(field in data) ||
+        data[field] == null ||
+        (data[field] is string && data[field].size() <= 200) ||
+        data[field] is number;
+    }
+
+    function isValidTimestampValue(val) {
+      return (val is number && val >= 0) ||
+        (val is string && val.size() <= 64) ||
+        val is timestamp;
+    }
+
+    function isValidOptionalTimestampField(data, field) {
+      return !(field in data) || data[field] == null || isValidTimestampValue(data[field]);
+    }
+
+    // Curriculum URLs must be empty, relative (/...), or https:// (never data: / raw Base64 PDF).
+    function isSafeCurriculumUrl(val) {
+      return val is string &&
+        val.size() <= 2048 &&
+        (val == '' || val.matches('^https://.*') || val.matches('^/.*'));
+    }
+
+    // Image fields allow empty, bounded http(s)/relative URLs, or compressed image data URIs (<= 180KB),
+    // and strictly reject raw PDF data URIs or multi-hundred-KB Base64 blobs.
+    function isSafeImageValue(val) {
+      return val is string &&
+        !val.matches('^data:application/pdf.*') &&
+        (
+          val == '' ||
+          (val.size() <= 2048 && (val.matches('^https://.*') || val.matches('^http://.*') || val.matches('^/.*'))) ||
+          (val.size() <= 180000 && val.matches('^data:image/(jpeg|jpg|png|webp|gif);base64,.*'))
+        );
+    }
+
+    function isValidOptionalImageField(data, field) {
+      return !(field in data) || data[field] == null || isSafeImageValue(data[field]);
+    }
+
+    // Video/link URLs allow empty or bounded http(s):// URLs (never data:/javascript: blobs).
+    function isSafeHttpUrl(val) {
+      return val is string &&
+        val.size() <= 2048 &&
+        (val == '' || val.matches('^https://.*') || val.matches('^http://.*'));
+    }
+
+    function isValidOptionalHttpUrlField(data, field) {
+      return !(field in data) || data[field] == null || isSafeHttpUrl(data[field]);
+    }
+
+    function isValidOptionalList(data, field, maxSize) {
+      return !(field in data) || (data[field] is list && data[field].size() <= maxSize);
+    }
+
+    function isValidDateKey(val) {
+      return val is string && val.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidMainConfig(data) {
+      return hasOnlyAllowedFields([
+          'services', 'servants', 'authorizedServants', 'updatedAt',
+          'khedmaName', 'osraName', 'osraLogo', 'khedmaLogo',
+          'secretPass', 'deletePass', 'adminPass', 'appUrl'
+        ]) &&
+        (('services' in data) || ('servants' in data) || ('authorizedServants' in data)) &&
+        isValidOptionalList(data, 'services', 100) &&
+        isValidOptionalList(data, 'servants', 500) &&
+        isValidOptionalList(data, 'authorizedServants', 500) &&
+        isValidOptionalTimestampField(data, 'updatedAt') &&
+        isValidOptionalNullableString(data, 'khedmaName', 200) &&
+        isValidOptionalNullableString(data, 'osraName', 200) &&
+        isValidOptionalImageField(data, 'osraLogo') &&
+        isValidOptionalImageField(data, 'khedmaLogo') &&
+        isValidOptionalNullableString(data, 'secretPass', 100) &&
+        isValidOptionalNullableString(data, 'deletePass', 100) &&
+        isValidOptionalNullableString(data, 'adminPass', 100) &&
+        isValidOptionalNullableString(data, 'appUrl', 500);
+    }
+
+    function isValidAppConfig(data) {
+      return hasOnlyAllowedFields([
+          'latestVersion', 'updateLink', 'minVersion',
+          'forceUpdate', 'releaseNotes', 'updatedAt'
+        ]) &&
+        isValidOptionalString(data, 'latestVersion', 32) &&
+        (!('updateLink' in data) || (
+          data.updateLink is string &&
+          data.updateLink.size() <= 2048 &&
+          (data.updateLink == '' || data.updateLink.matches('^https://.*') || data.updateLink.matches('^/.*'))
+        )) &&
+        isValidOptionalString(data, 'minVersion', 32) &&
+        isValidOptionalBool(data, 'forceUpdate') &&
+        isValidOptionalString(data, 'releaseNotes', 4000) &&
+        isValidOptionalTimestampField(data, 'updatedAt');
+    }
+
+    function isValidBroadcastNotifications(data) {
+      return hasOnlyAllowedFields(['items', 'updatedAt']) &&
+        hasRequiredFields(['items']) &&
+        data.items is list &&
+        data.items.size() <= 50 &&
+        isValidOptionalTimestampField(data, 'updatedAt');
+    }
+
+    function isValidBroadcastMessages(data) {
+      return hasOnlyAllowedFields(['items', 'updatedAt']) &&
+        hasRequiredFields(['items']) &&
+        data.items is list &&
+        data.items.size() <= 100 &&
+        isValidOptionalTimestampField(data, 'updatedAt');
+    }
+
+    // Encrypted envelope validator used by children and childIdentities.
+    function isValidEncryptedChildEnvelope(data) {
+      return hasOnlyAllowedFields([
+          'payload', 'updatedAt',
+          'isDeleted', 'deletedAt', 'deletedBy', 'restoredAt', 'restoredBy'
+        ]) &&
+        ('payload' in data) &&
+        data.payload is string &&
+        data.payload.size() > 0 &&
+        data.payload.size() <= 250000 &&
+        isValidOptionalTimestampField(data, 'updatedAt') &&
+        isValidOptionalBool(data, 'isDeleted') &&
+        isValidOptionalNullableNumber(data, 'deletedAt') &&
+        isValidOptionalNullableString(data, 'deletedBy', 150) &&
+        isValidOptionalNullableNumber(data, 'restoredAt') &&
+        isValidOptionalNullableString(data, 'restoredBy', 150);
+    }
+
+    // Direct unencrypted child document validator (legacy compatibility, strict allowlist).
+    function isValidDirectChildDocument(data) {
+      return hasOnlyAllowedFields([
+          'id', 'cloudId', 'qrId', 'aliasIds', 'cloudIds', 'name', 'syncKey',
+          'className', 'stage', 'phone', 'motherPhone', 'fatherPhone', 'childPhone',
+          'whatsappTarget', 'gender', 'streak', 'last_liturgy', 'last_service',
+          'last_visited', 'lastVisitationType', 'lastVisitationLabel',
+          'last_birthday_gift', 'last_reward_date', 'address', 'detailedAddress',
+          'gpsLink', 'lat', 'lng', 'birthDate', 'birthMonth', 'birthDay',
+          'fatherJob', 'specialNotes', 'notes', 'profilePic', 'image', 'photo',
+          'fatherConfessor', 'confessionFather', 'isOrdained', 'ordinationRank',
+          'isBrother', 'gotClothes', 'massAttendance', 'preparation',
+          'serviceMeetingAttendance', 'visitationParticipation', 'lastConfessionDate',
+          'activityParticipation', 'medicalStatus', 'isDirty', 'lifecycleDirty',
+          'updatedAt', 'createdAt', 'isDeleted', 'deletedAt', 'deletedBy',
+          'restoredAt', 'restoredBy'
+        ]) &&
+        hasRequiredFields(['name']) &&
+        data.name is string &&
+        data.name.size() > 0 &&
+        data.name.size() <= 200 &&
+        isValidOptionalIdValue(data, 'id') &&
+        isValidOptionalIdValue(data, 'cloudId') &&
+        isValidOptionalIdValue(data, 'qrId') &&
+        isValidOptionalList(data, 'aliasIds', 100) &&
+        isValidOptionalList(data, 'cloudIds', 100) &&
+        isValidOptionalString(data, 'syncKey', 150) &&
+        isValidOptionalString(data, 'className', 150) &&
+        isValidOptionalString(data, 'stage', 150) &&
+        isValidOptionalString(data, 'phone', 40) &&
+        isValidOptionalString(data, 'motherPhone', 40) &&
+        isValidOptionalString(data, 'fatherPhone', 40) &&
+        isValidOptionalString(data, 'childPhone', 40) &&
+        isValidOptionalString(data, 'whatsappTarget', 32) &&
+        isValidOptionalString(data, 'gender', 32) &&
+        isValidOptionalNullableNumber(data, 'streak') &&
+        isValidOptionalTimestampField(data, 'last_liturgy') &&
+        isValidOptionalTimestampField(data, 'last_service') &&
+        isValidOptionalTimestampField(data, 'last_visited') &&
+        isValidOptionalString(data, 'lastVisitationType', 64) &&
+        isValidOptionalString(data, 'lastVisitationLabel', 100) &&
+        isValidOptionalTimestampField(data, 'last_birthday_gift') &&
+        isValidOptionalTimestampField(data, 'last_reward_date') &&
+        isValidOptionalString(data, 'address', 500) &&
+        isValidOptionalString(data, 'detailedAddress', 1000) &&
+        isValidOptionalString(data, 'gpsLink', 1000) &&
+        isValidOptionalNullableNumber(data, 'lat') &&
+        isValidOptionalNullableNumber(data, 'lng') &&
+        isValidOptionalString(data, 'birthDate', 64) &&
+        isValidOptionalNullableNumber(data, 'birthMonth') &&
+        isValidOptionalNullableNumber(data, 'birthDay') &&
+        isValidOptionalString(data, 'fatherJob', 150) &&
+        isValidOptionalString(data, 'specialNotes', 4000) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 4000) || (data.notes is list && data.notes.size() <= 500)) &&
+        isValidOptionalImageField(data, 'profilePic') &&
+        isValidOptionalImageField(data, 'image') &&
+        isValidOptionalImageField(data, 'photo') &&
+        isValidOptionalString(data, 'fatherConfessor', 150) &&
+        isValidOptionalString(data, 'confessionFather', 150) &&
+        isValidOptionalBool(data, 'isOrdained') &&
+        isValidOptionalString(data, 'ordinationRank', 100) &&
+        isValidOptionalBool(data, 'isBrother') &&
+        isValidOptionalBool(data, 'gotClothes') &&
+        isValidOptionalBool(data, 'massAttendance') &&
+        isValidOptionalBool(data, 'preparation') &&
+        isValidOptionalBool(data, 'serviceMeetingAttendance') &&
+        isValidOptionalBool(data, 'visitationParticipation') &&
+        isValidOptionalString(data, 'lastConfessionDate', 64) &&
+        isValidOptionalBool(data, 'activityParticipation') &&
+        isValidOptionalString(data, 'medicalStatus', 500) &&
+        isValidOptionalBool(data, 'isDirty') &&
+        isValidOptionalBool(data, 'lifecycleDirty') &&
+        isValidOptionalTimestampField(data, 'updatedAt') &&
+        isValidOptionalTimestampField(data, 'createdAt') &&
+        isValidOptionalBool(data, 'isDeleted') &&
+        isValidOptionalNullableNumber(data, 'deletedAt') &&
+        isValidOptionalNullableString(data, 'deletedBy', 150) &&
+        isValidOptionalNullableNumber(data, 'restoredAt') &&
+        isValidOptionalNullableString(data, 'restoredBy', 150);
+    }
+
+    function isValidChildDocument(data) {
+      return ('payload' in data)
+        ? isValidEncryptedChildEnvelope(data)
+        : isValidDirectChildDocument(data);
+    }
+
+    // Server-side Zombie Resurrection Block for children and childIdentities:
+    // If existing.isDeleted == true, incoming MUST keep isDeleted present and bool:
+    //   - Either isDeleted remains true (tombstone preserved on concurrent edit/re-delete),
+    //   - Or isDeleted becomes false ONLY when restoredAt is a number strictly greater
+    //     than existing.deletedAt (or > 0 when legacy deletedAt is null or absent).
+    function canUpdateChildLifecycle(existing, incoming) {
+      return existing.get('isDeleted', false) != true ||
+        (
+          ('isDeleted' in incoming) &&
+          incoming.isDeleted is bool &&
+          (
+            incoming.isDeleted == true ||
+            (
+              incoming.isDeleted == false &&
+              ('restoredAt' in incoming) &&
+              incoming.restoredAt is number &&
+              (
+                (('deletedAt' in existing) && existing.deletedAt is number)
+                  ? incoming.restoredAt > existing.deletedAt
+                  : incoming.restoredAt > 0
+              )
+            )
+          )
+        );
+    }
+
+    function isValidAttendanceDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields([
+              'payload', 'updatedAt',
+              'isDeleted', 'deletedAt', 'deletedBy', 'restoredAt', 'restoredBy'
+            ]) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 100000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted') &&
+            isValidOptionalNullableNumber(data, 'deletedAt') &&
+            isValidOptionalNullableString(data, 'deletedBy', 150) &&
+            isValidOptionalNullableNumber(data, 'restoredAt') &&
+            isValidOptionalNullableString(data, 'restoredBy', 150)
+          )
+        : (
+            hasOnlyAllowedFields([
+              'id', 'cloudId', 'childId', 'childCloudId', 'childLocalId',
+              'childName', 'date', 'type', 'sessionKey', 'sessionLabel',
+              'status', 'visitationType', 'visitationLabel', 'note', 'notes',
+              'recordedBy', 'syncKey', 'timestamp', 'updatedAt', 'updatedAtMs',
+              'createdAt', 'isDirty', 'isDeleted'
+            ]) &&
+            (('childId' in data) || ('childCloudId' in data)) &&
+            hasRequiredFields(['date', 'type']) &&
+            isValidOptionalIdValue(data, 'id') &&
+            isValidOptionalIdValue(data, 'cloudId') &&
+            isValidOptionalIdValue(data, 'childId') &&
+            isValidOptionalIdValue(data, 'childCloudId') &&
+            isValidOptionalIdValue(data, 'childLocalId') &&
+            isValidOptionalString(data, 'childName', 200) &&
+            data.date is string && data.date.size() > 0 && data.date.size() <= 40 &&
+            data.type is string && data.type.size() > 0 && data.type.size() <= 40 &&
+            isValidOptionalNullableString(data, 'sessionKey', 100) &&
+            isValidOptionalNullableString(data, 'sessionLabel', 150) &&
+            isValidOptionalString(data, 'status', 40) &&
+            isValidOptionalString(data, 'visitationType', 64) &&
+            isValidOptionalString(data, 'visitationLabel', 100) &&
+            isValidOptionalString(data, 'note', 2000) &&
+            isValidOptionalString(data, 'notes', 2000) &&
+            isValidOptionalString(data, 'recordedBy', 150) &&
+            isValidOptionalString(data, 'syncKey', 150) &&
+            isValidOptionalTimestampField(data, 'timestamp') &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalNullableNumber(data, 'updatedAtMs') &&
+            isValidOptionalTimestampField(data, 'createdAt') &&
+            isValidOptionalBool(data, 'isDirty') &&
+            isValidOptionalBool(data, 'isDeleted')
+          );
+    }
+
+    function isValidVisitationDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields(['payload', 'updatedAt', 'isDeleted']) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 100000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          )
+        : (
+            hasOnlyAllowedFields([
+              'id', 'cloudId', 'childId', 'childCloudId', 'childName',
+              'date', 'type', 'status', 'visitationType', 'visitationLabel',
+              'note', 'notes', 'recordedBy', 'syncKey',
+              'updatedAt', 'createdAt', 'isDirty', 'isDeleted'
+            ]) &&
+            (
+              ('childId' in data && data.childId != null && (!(data.childId is string) || data.childId.size() > 0)) ||
+              ('childCloudId' in data && data.childCloudId != null && (!(data.childCloudId is string) || data.childCloudId.size() > 0))
+            ) &&
+            hasRequiredFields(['date']) &&
+            isValidOptionalIdValue(data, 'id') &&
+            isValidOptionalIdValue(data, 'cloudId') &&
+            isValidOptionalIdValue(data, 'childId') &&
+            isValidOptionalIdValue(data, 'childCloudId') &&
+            isValidOptionalNullableString(data, 'childName', 200) &&
+            data.date is string && data.date.size() > 0 && data.date.size() <= 40 &&
+            isValidOptionalNullableString(data, 'type', 40) &&
+            isValidOptionalNullableString(data, 'status', 40) &&
+            isValidOptionalNullableString(data, 'visitationType', 64) &&
+            isValidOptionalNullableString(data, 'visitationLabel', 100) &&
+            isValidOptionalNullableString(data, 'note', 2000) &&
+            isValidOptionalNullableString(data, 'notes', 2000) &&
+            isValidOptionalNullableString(data, 'recordedBy', 150) &&
+            isValidOptionalNullableString(data, 'syncKey', 150) &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalTimestampField(data, 'createdAt') &&
+            isValidOptionalBool(data, 'isDirty') &&
+            isValidOptionalBool(data, 'isDeleted')
+          );
+    }
+
+    function isValidEventDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields(['payload', 'updatedAt', 'isDeleted']) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 150000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          )
+        : (
+            hasOnlyAllowedFields([
+              'id', 'syncKey', 'isGlobal', 'createdAt', 'updatedAt',
+              'title', 'date', 'price', 'createdBy', 'tasks', 'isDirty', 'isDeleted'
+            ]) &&
+            hasRequiredFields(['title', 'date']) &&
+            isValidOptionalIdValue(data, 'id') &&
+            isValidOptionalString(data, 'syncKey', 150) &&
+            isValidOptionalBool(data, 'isGlobal') &&
+            isValidOptionalTimestampField(data, 'createdAt') &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+            data.date is string && data.date.size() > 0 && data.date.size() <= 40 &&
+            isValidOptionalString(data, 'price', 100) &&
+            isValidOptionalString(data, 'createdBy', 150) &&
+            isValidOptionalList(data, 'tasks', 200) &&
+            isValidOptionalBool(data, 'isDirty') &&
+            isValidOptionalBool(data, 'isDeleted')
+          );
+    }
+
+    function isValidActivityDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields(['payload', 'updatedAt', 'isDeleted']) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 100000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          )
+        : (
+            hasOnlyAllowedFields([
+              'id', 'syncKey', 'text', 'type', 'date',
+              'createdBy', 'createdAt', 'updatedAt', 'isDirty', 'isDeleted'
+            ]) &&
+            hasRequiredFields(['text']) &&
+            isValidOptionalIdValue(data, 'id') &&
+            isValidOptionalString(data, 'syncKey', 150) &&
+            data.text is string && data.text.size() > 0 && data.text.size() <= 4000 &&
+            isValidOptionalString(data, 'type', 64) &&
+            isValidOptionalString(data, 'date', 40) &&
+            isValidOptionalString(data, 'createdBy', 150) &&
+            isValidOptionalTimestampField(data, 'createdAt') &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDirty') &&
+            isValidOptionalBool(data, 'isDeleted')
+          );
+    }
+
+    function isValidExamDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields(['payload', 'updatedAt', 'isDeleted']) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 100000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          )
+        : (
+            hasOnlyAllowedFields([
+              'id', 'firebaseId', 'examName', 'category', 'maxGrade', 'date',
+              'syncKey', 'createdBy', 'recordedBy', 'notes', 'updatedAt',
+              'createdAt', 'isDeleted'
+            ]) &&
+            hasRequiredFields(['examName', 'maxGrade', 'date', 'syncKey']) &&
+            isValidOptionalIdValue(data, 'id') &&
+            isValidOptionalIdValue(data, 'firebaseId') &&
+            data.examName is string && data.examName.size() > 0 && data.examName.size() <= 200 &&
+            isValidOptionalNullableString(data, 'category', 150) &&
+            data.maxGrade is number && data.maxGrade >= 1 && data.maxGrade <= 100000 &&
+            data.date is string && data.date.size() > 0 && data.date.size() <= 40 &&
+            data.syncKey is string && data.syncKey.size() > 0 && data.syncKey.size() <= 150 &&
+            isValidOptionalNullableString(data, 'createdBy', 150) &&
+            isValidOptionalNullableString(data, 'recordedBy', 150) &&
+            isValidOptionalNullableString(data, 'notes', 1000) &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalTimestampField(data, 'createdAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          );
+    }
+
+    function isValidGradeDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields(['payload', 'updatedAt', 'isDeleted']) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 50000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          )
+        : (
+            hasOnlyAllowedFields([
+              'childId', 'grade', 'examId', 'examName', 'category',
+              'maxGrade', 'date', 'note', 'notes', 'recordedBy', 'createdBy',
+              'syncKey', 'updatedAt', 'isDeleted'
+            ]) &&
+            hasRequiredFields(['childId', 'grade', 'examId']) &&
+            isValidOptionalIdValue(data, 'childId') &&
+            data.grade is number && data.grade >= 0 && data.grade <= 100000 &&
+            data.examId is string && data.examId.size() > 0 && data.examId.size() <= 200 &&
+            isValidOptionalString(data, 'examName', 200) &&
+            isValidOptionalNullableString(data, 'category', 150) &&
+            isValidOptionalNumber(data, 'maxGrade') &&
+            isValidOptionalString(data, 'date', 40) &&
+            isValidOptionalNullableString(data, 'note', 1000) &&
+            isValidOptionalNullableString(data, 'notes', 1000) &&
+            isValidOptionalNullableString(data, 'recordedBy', 150) &&
+            isValidOptionalNullableString(data, 'createdBy', 150) &&
+            isValidOptionalString(data, 'syncKey', 150) &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          );
+    }
+
+    function isValidPointsLogDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields([
+              'payload', 'updatedAt', 'isDeleted', 'deletedAt', 'restoredAt'
+            ]) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 50000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted') &&
+            isValidOptionalNullableNumber(data, 'deletedAt') &&
+            isValidOptionalNullableNumber(data, 'restoredAt')
+          )
+        : (
+            hasOnlyAllowedFields([
+              'id', 'childId', 'childName', 'syncKey', 'date', 'monthKey',
+              'points', 'category', 'reason', 'awardedBy', 'recordedBy',
+              'createdBy', 'notes', 'isAutoAttendance', 'isDirty',
+              'updatedAt', 'isDeleted'
+            ]) &&
+            hasRequiredFields(['childId', 'syncKey', 'points']) &&
+            isValidOptionalIdValue(data, 'id') &&
+            isValidOptionalIdValue(data, 'childId') &&
+            isValidOptionalString(data, 'childName', 200) &&
+            data.syncKey is string && data.syncKey.size() > 0 && data.syncKey.size() <= 150 &&
+            isValidOptionalString(data, 'date', 40) &&
+            isValidOptionalString(data, 'monthKey', 20) &&
+            data.points is number && data.points >= -10000 && data.points <= 10000 &&
+            isValidOptionalString(data, 'category', 64) &&
+            isValidOptionalString(data, 'reason', 500) &&
+            isValidOptionalString(data, 'awardedBy', 150) &&
+            isValidOptionalNullableString(data, 'recordedBy', 150) &&
+            isValidOptionalNullableString(data, 'createdBy', 150) &&
+            isValidOptionalNullableString(data, 'notes', 1000) &&
+            isValidOptionalBool(data, 'isAutoAttendance') &&
+            isValidOptionalBool(data, 'isDirty') &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          );
+    }
+
+    function isValidCurriculumDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields(['payload', 'updatedAt', 'isDeleted']) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 100000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted')
+          )
+        : (
+            hasOnlyAllowedFields([
+              'id', 'title', 'syncKey', 'serviceName', 'category', 'itemType',
+              'weekLabel', 'lessonDate', 'weekDate', 'month', 'content',
+              'description', 'notes', 'teacherNotes', 'recordedBy', 'createdBy',
+              'fileUrl', 'attachmentUrl', 'pdfData', 'cloudinaryPublicId',
+              'fileName', 'originalFileSize', 'compressedFileSize', 'status',
+              'trackId', 'trackName', 'partNumber', 'partLabel', 'totalPages',
+              'copticMonths', 'lessons', 'createdAt', 'updatedAt', 'isDirty',
+              'isDeleted'
+            ]) &&
+            hasRequiredFields(['syncKey']) &&
+            isValidOptionalIdValue(data, 'id') &&
+            (
+              (('isDeleted' in data) && data.isDeleted == true && isValidOptionalNullableString(data, 'title', 300)) ||
+              ('title' in data && data.title is string && data.title.size() > 0 && data.title.size() <= 300)
+            ) &&
+            data.syncKey is string && data.syncKey.size() > 0 && data.syncKey.size() <= 150 &&
+            isValidOptionalString(data, 'serviceName', 200) &&
+            isValidOptionalString(data, 'category', 150) &&
+            isValidOptionalString(data, 'itemType', 40) &&
+            isValidOptionalString(data, 'weekLabel', 150) &&
+            isValidOptionalString(data, 'lessonDate', 40) &&
+            isValidOptionalString(data, 'weekDate', 40) &&
+            isValidOptionalString(data, 'month', 40) &&
+            isValidOptionalString(data, 'content', 20000) &&
+            isValidOptionalString(data, 'description', 20000) &&
+            isValidOptionalNullableString(data, 'notes', 5000) &&
+            isValidOptionalString(data, 'teacherNotes', 5000) &&
+            isValidOptionalNullableString(data, 'recordedBy', 150) &&
+            isValidOptionalNullableString(data, 'createdBy', 150) &&
+            (!('fileUrl' in data) || isSafeCurriculumUrl(data.fileUrl)) &&
+            (!('attachmentUrl' in data) || isSafeCurriculumUrl(data.attachmentUrl)) &&
+            (!('pdfData' in data) || isSafeCurriculumUrl(data.pdfData)) &&
+            isValidOptionalString(data, 'cloudinaryPublicId', 300) &&
+            isValidOptionalString(data, 'fileName', 300) &&
+            isValidOptionalNullableNumber(data, 'originalFileSize') &&
+            isValidOptionalNullableNumber(data, 'compressedFileSize') &&
+            isValidOptionalString(data, 'status', 100) &&
+            isValidOptionalNullableString(data, 'trackId', 120) &&
+            isValidOptionalNullableString(data, 'trackName', 200) &&
+            (!('partNumber' in data) || data.partNumber == null || (data.partNumber is number && data.partNumber >= 1 && data.partNumber <= 10)) &&
+            isValidOptionalNullableString(data, 'partLabel', 150) &&
+            (!('totalPages' in data) || data.totalPages == null || (data.totalPages is number && data.totalPages >= 0 && data.totalPages <= 100000)) &&
+            (!('copticMonths' in data) || data.copticMonths == null || (data.copticMonths is list && data.copticMonths.size() <= 20)) &&
+            (!('lessons' in data) || data.lessons == null || (data.lessons is list && data.lessons.size() <= 120)) &&
+            isValidOptionalTimestampField(data, 'createdAt') &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDirty') &&
+            isValidOptionalBool(data, 'isDeleted')
+          );
+    }
+
+    function isValidMessageDocument(data) {
+      return ('payload' in data)
+        ? (
+            hasOnlyAllowedFields(['payload', 'updatedAt', 'isDeleted', 'deletedAt']) &&
+            data.payload is string &&
+            data.payload.size() > 0 &&
+            data.payload.size() <= 100000 &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDeleted') &&
+            isValidOptionalTimestampField(data, 'deletedAt')
+          )
+        : (
+            hasOnlyAllowedFields([
+              'id', 'syncKey', 'targetType', 'targetScope', 'scopeKind',
+              'targetSyncKey', 'targetStage', 'stageName', 'targetLabel',
+              'title', 'body', 'imageUrl', 'videoUrl', 'linkUrl',
+              'linkLabel', 'linkTitle', 'senderName', 'senderRole',
+              'senderPhone', 'senderDeviceId', 'createdAt', 'updatedAt',
+              'isDirty', 'isDeleted', 'deletedAt'
+            ]) &&
+            (
+              ('title' in data && data.title is string && data.title.size() > 0) ||
+              ('body' in data && data.body is string && data.body.size() > 0) ||
+              ('imageUrl' in data && data.imageUrl is string && data.imageUrl.size() > 0) ||
+              ('videoUrl' in data && data.videoUrl is string && data.videoUrl.size() > 0) ||
+              ('linkUrl' in data && data.linkUrl is string && data.linkUrl.size() > 0) ||
+              ('isDeleted' in data && data.isDeleted == true)
+            ) &&
+            isValidOptionalIdValue(data, 'id') &&
+            isValidOptionalNullableString(data, 'syncKey', 150) &&
+            isValidOptionalNullableString(data, 'targetType', 64) &&
+            isValidOptionalNullableString(data, 'targetScope', 100) &&
+            isValidOptionalNullableString(data, 'scopeKind', 64) &&
+            isValidOptionalNullableString(data, 'targetSyncKey', 150) &&
+            isValidOptionalNullableString(data, 'targetStage', 150) &&
+            isValidOptionalNullableString(data, 'stageName', 150) &&
+            isValidOptionalNullableString(data, 'targetLabel', 200) &&
+            isValidOptionalNullableString(data, 'title', 300) &&
+            isValidOptionalNullableString(data, 'body', 8000) &&
+            isValidOptionalImageField(data, 'imageUrl') &&
+            isValidOptionalHttpUrlField(data, 'videoUrl') &&
+            isValidOptionalHttpUrlField(data, 'linkUrl') &&
+            isValidOptionalNullableString(data, 'linkLabel', 200) &&
+            isValidOptionalNullableString(data, 'linkTitle', 200) &&
+            isValidOptionalNullableString(data, 'senderName', 150) &&
+            isValidOptionalNullableString(data, 'senderRole', 100) &&
+            isValidOptionalNullableString(data, 'senderPhone', 40) &&
+            isValidOptionalNullableString(data, 'senderDeviceId', 120) &&
+            isValidOptionalTimestampField(data, 'createdAt') &&
+            isValidOptionalTimestampField(data, 'updatedAt') &&
+            isValidOptionalBool(data, 'isDirty') &&
+            isValidOptionalBool(data, 'isDeleted') &&
+            isValidOptionalTimestampField(data, 'deletedAt')
+          );
+    }
+
+    function isValidServantDocument(data) {
+      return hasOnlyAllowedFields([
+          'id', 'uid', 'docId', 'name', 'phone', 'role', 'assignedOsra',
+          'osraName', 'syncKey', 'stageName', 'serviceName', 'gender',
+          'allowedClasses', 'assignedStages', 'email', 'photoURL',
+          'profileImage', 'profilePic', 'address', 'fatherConfessor',
+          'confessionFather', 'birthDate', 'birthdate', 'notes', 'password',
+          'createdAt', 'updatedAt', 'isDeleted'
+        ]) &&
+        hasRequiredFields(['name']) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 150 &&
+        isValidOptionalIdValue(data, 'id') &&
+        isValidOptionalString(data, 'uid', 150) &&
+        isValidOptionalNullableString(data, 'docId', 150) &&
+        isValidOptionalString(data, 'phone', 40) &&
+        isValidOptionalString(data, 'role', 100) &&
+        isValidOptionalString(data, 'assignedOsra', 150) &&
+        isValidOptionalString(data, 'osraName', 150) &&
+        isValidOptionalString(data, 'syncKey', 150) &&
+        isValidOptionalString(data, 'stageName', 150) &&
+        isValidOptionalString(data, 'serviceName', 150) &&
+        isValidOptionalString(data, 'gender', 32) &&
+        isValidOptionalList(data, 'allowedClasses', 100) &&
+        isValidOptionalList(data, 'assignedStages', 50) &&
+        isValidOptionalString(data, 'email', 150) &&
+        isValidOptionalImageField(data, 'photoURL') &&
+        isValidOptionalImageField(data, 'profileImage') &&
+        isValidOptionalImageField(data, 'profilePic') &&
+        isValidOptionalString(data, 'address', 500) &&
+        isValidOptionalString(data, 'fatherConfessor', 150) &&
+        isValidOptionalString(data, 'confessionFather', 150) &&
+        isValidOptionalString(data, 'birthDate', 64) &&
+        isValidOptionalString(data, 'birthdate', 64) &&
+        isValidOptionalString(data, 'notes', 4000) &&
+        isValidOptionalString(data, 'password', 150) &&
+        isValidOptionalTimestampField(data, 'createdAt') &&
+        isValidOptionalTimestampField(data, 'updatedAt') &&
+        isValidOptionalBool(data, 'isDeleted');
+    }
+
+    function isValidServantAttendance(data) {
+      return hasOnlyAllowedFields([
+          'id', 'uid', 'servantId', 'phone', 'name', 'osraName',
+          'weekDate', 'month', 'attendance', 'status', 'excuseNote',
+          'liturgy', 'preparation', 'meeting', 'visitation', 'confessionDate',
+          'activitiesService', 'activitiesDiocese', 'tasks', 'leaderNotes',
+          'profileImage', 'updatedAt', 'createdAt'
+        ]) &&
+        hasRequiredFields(['uid', 'weekDate', 'attendance']) &&
+        isValidOptionalIdValue(data, 'id') &&
+        data.uid is string && data.uid.size() > 0 && data.uid.size() <= 150 &&
+        isValidOptionalIdValue(data, 'servantId') &&
+        isValidOptionalString(data, 'phone', 40) &&
+        isValidOptionalString(data, 'name', 150) &&
+        isValidOptionalString(data, 'osraName', 150) &&
+        isValidDateKey(data.weekDate) &&
+        (!('month' in data) || (data.month is string && data.month.matches('^(\\d{4}-\\d{2})?$'))) &&
+        data.attendance is string &&
+        data.attendance in ['حضور', 'غياب', 'اعتذار', ''] &&
+        isValidOptionalString(data, 'status', 32) &&
+        isValidOptionalString(data, 'excuseNote', 1000) &&
+        isValidOptionalBool(data, 'liturgy') &&
+        isValidOptionalBool(data, 'preparation') &&
+        isValidOptionalBool(data, 'meeting') &&
+        isValidOptionalBool(data, 'visitation') &&
+        isValidOptionalString(data, 'confessionDate', 40) &&
+        isValidOptionalBool(data, 'activitiesService') &&
+        isValidOptionalString(data, 'activitiesDiocese', 1000) &&
+        isValidOptionalString(data, 'tasks', 2000) &&
+        isValidOptionalString(data, 'leaderNotes', 2000) &&
+        isValidOptionalImageField(data, 'profileImage') &&
+        isValidOptionalTimestampField(data, 'updatedAt') &&
+        isValidOptionalTimestampField(data, 'createdAt');
+    }
+
+    function isValidJoinRequest(data) {
+      return hasOnlyAllowedFields([
+          'name', 'phone', 'serviceName', 'osraName',
+          'profileImage', 'email', 'status', 'createdAt'
+        ]) &&
+        hasRequiredFields([
+          'name', 'phone', 'serviceName', 'osraName', 'status', 'createdAt'
+        ]) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 150 &&
+        data.phone is string && data.phone.size() >= 5 && data.phone.size() <= 40 &&
+        data.serviceName is string && data.serviceName.size() > 0 && data.serviceName.size() <= 150 &&
+        data.osraName is string && data.osraName.size() > 0 && data.osraName.size() <= 150 &&
+        isValidOptionalImageField(data, 'profileImage') &&
+        isValidOptionalString(data, 'email', 150) &&
+        data.status == 'pending' &&
+        data.createdAt == request.time;
+    }
+
+    function isValidActivityLog(data) {
+      return hasOnlyAllowedFields([
+          'servantName', 'servantPhone', 'assignedOsra', 'role',
+          'actionType', 'details', 'timestamp', 'dateKey', 'clientTimestamp'
+        ]) &&
+        hasRequiredFields([
+          'servantName', 'actionType', 'details',
+          'timestamp', 'dateKey', 'clientTimestamp'
+        ]) &&
+        data.servantName is string && data.servantName.size() > 0 && data.servantName.size() <= 150 &&
+        isValidOptionalString(data, 'servantPhone', 40) &&
+        isValidOptionalString(data, 'assignedOsra', 150) &&
+        isValidOptionalString(data, 'role', 100) &&
+        data.actionType is string && data.actionType.size() > 0 && data.actionType.size() <= 80 &&
+        data.details is string && data.details.size() > 0 && data.details.size() <= 2000 &&
+        data.timestamp == request.time &&
+        isValidDateKey(data.dateKey) &&
+        data.clientTimestamp is string && data.clientTimestamp.size() >= 10 && data.clientTimestamp.size() <= 64;
+    }
+
+    // ===============================================================
+    // Explicit CollectionGroup Read Rules
+    // ===============================================================
+
+    match /{path=**}/children/{childId} {
+      allow read: if true;
+    }
+
+    match /{path=**}/events/{eventId} {
+      allow read: if true;
+    }
+
+    match /{path=**}/activities/{activityId} {
+      allow read: if true;
+    }
+
+    match /{path=**}/exams/{examId} {
+      allow read: if true;
+    }
+
+    match /{path=**}/messages/{messageId} {
+      allow read: if true;
+    }
+
+    // ===============================================================
+    // Collection & Subcollection Rules
+    // ===============================================================
+
+    // System configuration, version metadata, and broadcast notifications/messages.
+    // Unfiltered list on /System is used by ParentLogin; write is restricted
+    // strictly to the four known document IDs with schema validation.
+    match /System/{docId} {
+      allow read: if true;
+      allow create, update: if
+        (docId == 'mainConfig' && isValidMainConfig(request.resource.data)) ||
+        (docId == 'AppConfig' && isValidAppConfig(request.resource.data)) ||
+        (docId == 'broadcastNotifications' && isValidBroadcastNotifications(request.resource.data)) ||
+        (docId == 'broadcastMessages' && isValidBroadcastMessages(request.resource.data));
+      allow delete: if false;
+    }
+
+    // Church-wide and stage-wide broadcast messages subcollection under System/mainConfig.
+    match /System/mainConfig/broadcastMessages/{messageId} {
+      allow read: if true;
+      allow create, update: if isValidPathId(messageId) &&
+        isValidMessageDocument(request.resource.data);
+      allow delete: if isValidPathId(messageId);
+    }
+
+    // Per-class (Osra) data subcollections.
+    match /Osras/{syncKey} {
+
+      match /children/{childId} {
+        allow read: if true;
+        allow create: if isValidSyncKey(syncKey) &&
+          isValidPathId(childId) &&
+          isValidChildDocument(request.resource.data);
+        allow update: if isValidSyncKey(syncKey) &&
+          isValidPathId(childId) &&
+          isValidChildDocument(request.resource.data) &&
+          canUpdateChildLifecycle(resource.data, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /childIdentities/{identityId} {
+        allow read: if true;
+        allow create: if isValidSyncKey(syncKey) &&
+          isValidPathId(identityId) &&
+          isValidChildDocument(request.resource.data);
+        allow update: if isValidSyncKey(syncKey) &&
+          isValidPathId(identityId) &&
+          isValidChildDocument(request.resource.data) &&
+          canUpdateChildLifecycle(resource.data, request.resource.data);
+        allow delete: if false;
+      }
+
+      match /attendance/{attendanceId} {
+        allow read: if true;
+        allow create, update: if isValidSyncKey(syncKey) &&
+          isValidPathId(attendanceId) &&
+          isValidAttendanceDocument(request.resource.data);
+        allow delete: if isValidSyncKey(syncKey) && isValidPathId(attendanceId);
+      }
+
+      match /visitations/{visitationId} {
+        allow read: if true;
+        allow create, update: if isValidSyncKey(syncKey) &&
+          isValidPathId(visitationId) &&
+          isValidVisitationDocument(request.resource.data);
+        allow delete: if isValidSyncKey(syncKey) && isValidPathId(visitationId);
+      }
+
+      match /events/{eventId} {
+        allow read: if true;
+        allow create, update: if isValidSyncKey(syncKey) &&
+          isValidPathId(eventId) &&
+          isValidEventDocument(request.resource.data);
+        allow delete: if isValidSyncKey(syncKey) && isValidPathId(eventId);
+      }
+
+      match /activities/{activityId} {
+        allow read: if true;
+        allow create, update: if isValidSyncKey(syncKey) &&
+          isValidPathId(activityId) &&
+          isValidActivityDocument(request.resource.data);
+        allow delete: if isValidSyncKey(syncKey) && isValidPathId(activityId);
+      }
+
+      match /exams/{examId} {
+        allow read: if true;
+        allow create, update: if isValidSyncKey(syncKey) &&
+          isValidPathId(examId) &&
+          isValidExamDocument(request.resource.data);
+        allow delete: if isValidSyncKey(syncKey) && isValidPathId(examId);
+
+        match /grades/{gradeId} {
+          allow read: if true;
+          allow create, update: if isValidSyncKey(syncKey) &&
+            isValidPathId(examId) &&
+            isValidPathId(gradeId) &&
+            isValidGradeDocument(request.resource.data);
+          allow delete: if isValidSyncKey(syncKey) &&
+            isValidPathId(examId) &&
+            isValidPathId(gradeId);
+        }
+      }
+
+      match /pointsLogs/{pointId} {
+        allow read: if true;
+        allow create, update: if isValidSyncKey(syncKey) &&
+          isValidPathId(pointId) &&
+          isValidPointsLogDocument(request.resource.data);
+        allow delete: if isValidSyncKey(syncKey) && isValidPathId(pointId);
+      }
+
+      match /curricula/{curriculumId} {
+        allow read: if true;
+        allow create, update: if isValidSyncKey(syncKey) &&
+          isValidPathId(curriculumId) &&
+          isValidCurriculumDocument(request.resource.data);
+        allow delete: if isValidSyncKey(syncKey) && isValidPathId(curriculumId);
+      }
+
+      match /messages/{messageId} {
+        allow read: if true;
+        allow create, update: if isValidSyncKey(syncKey) &&
+          isValidPathId(messageId) &&
+          isValidMessageDocument(request.resource.data);
+        allow delete: if isValidSyncKey(syncKey) && isValidPathId(messageId);
+      }
+    }
+
+    // Servant directory documents.
+    match /servants/{servantId} {
+      allow read: if true;
+      allow create: if isValidPathId(servantId) &&
+        isValidServantDocument(request.resource.data);
+      allow update: if isValidPathId(servantId) &&
+        isValidServantDocument(request.resource.data) &&
+        (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt);
+      allow delete: if false;
+    }
+
+    // Weekly servant attendance and follow-up evaluations.
+    match /ServantAttendance/{docId} {
+      allow read: if true;
+      allow create, update: if isValidPathId(docId) &&
+        isValidServantAttendance(request.resource.data);
+      allow delete: if isValidPathId(docId);
+    }
+
+    // New servant registration requests (pending only on create, immutable, deletable by admin).
+    match /JoinRequests/{requestId} {
+      allow read: if true;
+      allow create: if isValidPathId(requestId) &&
+        isValidJoinRequest(request.resource.data);
+      allow update: if false;
+      allow delete: if isValidPathId(requestId);
+    }
+
+    // Central audit trail (append-only: updates and deletes strictly blocked).
+    match /activityLogs/{logId} {
+      allow read: if true;
+      allow create: if isValidPathId(logId) &&
+        isValidActivityLog(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // Default deny all unknown collections and subcollections.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

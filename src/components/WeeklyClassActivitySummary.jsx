@@ -1,0 +1,131 @@
+import React, { useState } from 'react';
+import { Calendar, ChevronDown, ChevronUp, Sparkles, CheckCircle2, Home, Clock } from 'lucide-react';
+
+export default function WeeklyClassActivitySummary({ classes = [], activityByClass = {}, classCounts = {}, isLoadingInitialData = false, onClassClick }) {
+    const [isCollapsed, setIsCollapsed] = useState(true);
+
+    if (!classes || classes.length === 0) return null;
+
+    let attendedCount = 0;
+    let visitedCount = 0;
+
+    classes.forEach(c => {
+        const key = String(c.syncKey || '').trim();
+        const act = activityByClass[key];
+        if (act?.hasRecordedAttendance) attendedCount++;
+        if (act?.hasRecordedVisitation) visitedCount++;
+    });
+
+    const totalClasses = classes.length;
+    const isAllAttended = attendedCount === totalClasses && totalClasses > 0;
+
+    return (
+        <div className="bg-white/90 backdrop-blur-md rounded-3xl p-3.5 sm:p-5 shadow-sm border border-slate-200/90 mb-5 transition-all" dir="rtl">
+            {/* Top Bar Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center justify-between gap-2 w-full sm:w-auto sm:flex-1 min-w-0">
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold shrink-0">
+                            <Calendar size={18} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                            <h3 className="text-xs sm:text-sm font-black text-slate-800 flex flex-wrap items-center gap-1.5">
+                                <span>إشعارات نشاط الفصول هذا الأسبوع</span>
+                                {isAllAttended && (
+                                    <span className="text-[10px] bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full font-bold border border-emerald-200 flex items-center gap-1 shrink-0">
+                                        <Sparkles size={11} /> ممتاز! اكتمل الحضور
+                                    </span>
+                                )}
+                            </h3>
+                            <p className="text-[10px] font-bold text-slate-400 leading-snug">
+                                متابعة دورة أسبوع الخدمة الحالي (من الخميس إلى الأربعاء)
+                            </p>
+                        </div>
+                    </div>
+
+                    <button 
+                        onClick={() => setIsCollapsed(!isCollapsed)}
+                        className="sm:hidden w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-colors shrink-0"
+                        title={isCollapsed ? 'عرض التفاصيل' : 'تصغير'}
+                    >
+                        {isCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                    </button>
+                </div>
+
+                <div className="flex items-center justify-between sm:justify-end gap-1.5 shrink-0 w-full sm:w-auto">
+                    {/* Quick counter chips */}
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-black w-full sm:w-auto">
+                        <span className="flex-1 sm:flex-initial text-center bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-xl whitespace-nowrap inline-flex items-center justify-center gap-1">
+                            <CheckCircle2 size={12} /> حضور: {attendedCount}/{totalClasses}
+                        </span>
+                        <span className="flex-1 sm:flex-initial text-center bg-blue-50 text-blue-700 border border-blue-200 px-2.5 py-1 rounded-xl whitespace-nowrap inline-flex items-center justify-center gap-1">
+                            <Home size={12} /> افتقاد: {visitedCount}/{totalClasses}
+                        </span>
+                    </div>
+
+                    <button 
+                        onClick={() => setIsCollapsed(!isCollapsed)}
+                        className="hidden sm:flex w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 items-center justify-center transition-colors shrink-0"
+                        title={isCollapsed ? 'عرض التفاصيل' : 'تصغير'}
+                    >
+                        {isCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                    </button>
+                </div>
+            </div>
+
+            {/* Class status pills list */}
+            {!isCollapsed && (
+                <div className="mt-3 pt-3 border-t border-slate-100">
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+                        {classes.map((c) => {
+                            const key = String(c.syncKey || '').trim();
+                            const act = activityByClass[key];
+                            const hasAtt = act?.hasRecordedAttendance;
+                            const hasVis = act?.hasRecordedVisitation;
+                            const pCount = act?.presentCount || 0;
+                            const totalKids = act?.totalActiveChildren ?? classCounts[key] ?? 0;
+                            const vCount = act?.visitationCount || 0;
+
+                            let pillBg = "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100";
+                            if (hasAtt && hasVis) {
+                                pillBg = "bg-emerald-50/80 border-emerald-300 text-emerald-900 hover:bg-emerald-100";
+                            } else if (hasAtt) {
+                                pillBg = "bg-green-50 border-green-200 text-green-900 hover:bg-green-100";
+                            } else if (hasVis) {
+                                pillBg = "bg-blue-50 border-blue-200 text-blue-900 hover:bg-blue-100";
+                            }
+
+                            return (
+                                <button
+                                    key={key}
+                                    onClick={() => onClassClick && onClassClick(c)}
+                                    className={`shrink-0 px-3 py-1.5 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-95 ${pillBg}`}
+                                >
+                                    <span className="font-black">{c.name}</span>
+                                    {hasAtt ? (
+                                        <span className="bg-emerald-600 text-white text-[10px] px-1.5 py-0.5 rounded-md font-bold inline-flex items-center gap-0.5">
+                                            <CheckCircle2 size={10} /> {pCount} / {totalKids}
+                                        </span>
+                                    ) : totalKids === 0 && isLoadingInitialData ? (
+                                        <span className="text-slate-400 text-[10px] animate-pulse inline-flex items-center gap-0.5">
+                                            <Clock size={10} /> ...
+                                        </span>
+                                    ) : (
+                                        <span className="text-slate-400 text-[10px] inline-flex items-center gap-0.5">
+                                            <Clock size={10} /> 0 / {totalKids}
+                                        </span>
+                                    )}
+                                    {hasVis && (
+                                        <span className="bg-blue-600 text-white text-[10px] px-1.5 py-0.5 rounded-md font-bold inline-flex items-center gap-0.5">
+                                            <Home size={10} /> {vCount}
+                                        </span>
+                                    )}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}

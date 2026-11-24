@@ -1,0 +1,256 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'El Messiri', 'Amiri', serif;
+  --color-church-blue: #1B2A59;
+  --color-church-blue-light: #253875;
+  --color-church-gold: #C8942E;
+  --color-church-gold-light: #F7E8C1;
+  --color-coptic-navy: #1B2A59;
+  --color-coptic-navy-deep: #111C3D;
+  --color-coptic-gold: #C8942E;
+  --color-coptic-gold-soft: #F7E8C1;
+  --color-alabaster: #FAF3E3;
+  --color-ivory: #FFFDF7;
+  --color-parchment: #F3E7CE;
+  --color-ink: #1E293B;
+}
+
+:root {
+  --surface-parchment: linear-gradient(165deg, #FAF3E3 0%, #F3E7CE 50%, #EFE0C2 100%);
+  --surface-card: #FFFDF7;
+  --surface-cream-soft: #FAF5E8;
+  --coptic-navy: #1B2A59;
+  --coptic-gold: #C8942E;
+  --ink-primary: #1E293B;
+  --ink-muted: #475569;
+  --ease-coptic: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16.5px;
+}
+
+html,
+body,
+#root {
+  max-width: 100vw;
+  overflow-x: hidden;
+  min-height: 100%;
+}
+
+body {
+  font-family: 'El Messiri', 'Amiri', serif !important;
+  font-size: 1rem;
+  font-weight: 500;
+  line-height: 1.65;
+  color: var(--ink-primary);
+  background:
+    radial-gradient(circle at 12% 14%, rgba(200, 148, 46, 0.14) 0%, transparent 42%),
+    radial-gradient(circle at 88% 82%, rgba(27, 42, 89, 0.08) 0%, transparent 46%),
+    var(--surface-parchment);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Enforce Hand-Drawn Arabic Font Globally Over Utility Classes */
+.font-sans,
+button,
+input,
+select,
+textarea {
+  font-family: 'El Messiri', 'Amiri', serif !important;
+}
+
+h1,
+h2,
+.font-calligraphic,
+.font-calligraphy,
+.church-title {
+  font-family: 'Aref Ruqaa', 'Reem Kufi', 'El Messiri', serif !important;
+  letter-spacing: 0;
+}
+
+.font-kufi {
+  font-family: 'Reem Kufi', 'El Messiri', sans-serif !important;
+}
+
+.font-amiri {
+  font-family: 'Amiri', 'El Messiri', serif !important;
+}
+
+.font-signature {
+  font-family: 'Great Vibes', 'Alex Brush', cursive !important;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Global Warm Creamy Parchment Overrides for Flat White/Slate Surfaces */
+.min-h-screen.bg-slate-50,
+.min-h-screen.bg-slate-100,
+.min-h-screen.bg-gray-50,
+.min-h-screen.bg-gray-100,
+.min-h-screen.bg-\[\#FAF7F2\],
+.min-h-screen.bg-white {
+  background:
+    radial-gradient(circle at 15% 12%, rgba(200, 148, 46, 0.13) 0%, transparent 40%),
+    radial-gradient(circle at 85% 86%, rgba(27, 42, 89, 0.07) 0%, transparent 45%),
+    linear-gradient(165deg, #FAF3E3 0%, #F3E7CE 50%, #EFE0C2 100%) !important;
+  background-attachment: fixed !important;
+}
+
+.bg-white:not(header):not(nav):not(button):not(.rounded-full) {
+  background-color: #FFFDF7;
+}
+
+.bg-slate-50,
+.bg-gray-50 {
+  background-color: #FAF5E8;
+}
+
+.border-slate-100,
+.border-slate-200,
+.border-gray-100,
+.border-gray-200 {
+  border-color: rgba(200, 148, 46, 0.25);
+}
+
+/* Luxury Ivory Cards & Elevation */
+.coptic-card {
+  background-color: rgba(255, 252, 244, 0.94) !important;
+  border: 1px solid rgba(200, 148, 46, 0.30) !important;
+  box-shadow: 0 12px 32px -8px rgba(92, 64, 20, 0.11);
+  transition: transform 280ms var(--ease-coptic), box-shadow 280ms var(--ease-coptic), border-color 280ms var(--ease-coptic);
+}
+
+.coptic-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 38px -10px rgba(92, 64, 20, 0.17);
+  border-color: rgba(200, 148, 46, 0.52) !important;
+}
+
+.coptic-cream-input {
+  background-color: #FAF5E8;
+  border: 1px solid rgba(200, 148, 46, 0.32);
+  color: #1B2A59;
+  transition: border-color 200ms ease, box-shadow 200ms ease, background-color 200ms ease;
+}
+
+.coptic-cream-input:focus {
+  background-color: #FFFDF7;
+  border-color: #C8942E;
+  box-shadow: 0 0 0 3px rgba(200, 148, 46, 0.20);
+  outline: none;
+}
+
+.tactile-press {
+  transition: transform 180ms var(--ease-coptic), box-shadow 220ms var(--ease-coptic);
+}
+
+.tactile-press:active {
+  transform: scale(0.975);
+}
+
+/* Living Motion Keyframes */
+@keyframes fadeUpScale {
+  from {
+    opacity: 0.85;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes floatSlow {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes goldShimmer {
+  0% {
+    background-position: 200% 50%;
+  }
+  100% {
+    background-position: -200% 50%;
+  }
+}
+
+.animate-card-enter,
+.animate-fade-up {
+  animation: fadeUpScale 320ms var(--ease-coptic) both;
+}
+
+.animate-float-slow {
+  animation: floatSlow 4.5s ease-in-out infinite;
+}
+
+.shimmer-gold-border {
+  position: relative;
+}
+
+.shimmer-gold-border::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: linear-gradient(110deg, transparent 25%, rgba(212, 175, 55, 0.65) 50%, transparent 75%);
+  background-size: 250% 100%;
+  animation: goldShimmer 4.5s linear infinite;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.stagger-1 { animation-delay: 45ms; }
+.stagger-2 { animation-delay: 95ms; }
+.stagger-3 { animation-delay: 145ms; }
+.stagger-4 { animation-delay: 195ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar,
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar,
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@media print {
+  .no-print { display: none !important; }
+  html, body, #root, main {
+    background: white !important;
+    overflow: visible !important;
+    max-width: none !important;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { border: 1px solid #ddd; padding: 8px; text-align: right; }
+  .print-only { display: block !important; }
+}
