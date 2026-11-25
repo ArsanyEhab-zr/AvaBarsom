@@ -23,8 +23,6 @@ function resolveBuildEditionMeta(rawEdition, { churchName, shortName, descriptio
         'editions/admin/logo.png',
         'editions/admin/pwa-192x192.png',
         'editions/admin/pwa-512x512.png',
-        'editions/admin/pwa-maskable-192x192.png',
-        'editions/admin/pwa-maskable-512x512.png',
         'editions/admin/og-image.png',
         'editions/admin/favicon.ico',
         'editions/admin/apple-touch-icon.png'
@@ -42,8 +40,6 @@ function resolveBuildEditionMeta(rawEdition, { churchName, shortName, descriptio
         'editions/servant/logo.png',
         'editions/servant/pwa-192x192.png',
         'editions/servant/pwa-512x512.png',
-        'editions/servant/pwa-maskable-192x192.png',
-        'editions/servant/pwa-maskable-512x512.png',
         'editions/servant/og-image.png',
         'editions/servant/favicon.ico',
         'editions/servant/apple-touch-icon.png'
@@ -61,8 +57,6 @@ function resolveBuildEditionMeta(rawEdition, { churchName, shortName, descriptio
         'editions/parent/logo.png',
         'editions/parent/pwa-192x192.png',
         'editions/parent/pwa-512x512.png',
-        'editions/parent/pwa-maskable-192x192.png',
-        'editions/parent/pwa-maskable-512x512.png',
         'editions/parent/og-image.png',
         'editions/parent/favicon.ico',
         'editions/parent/apple-touch-icon.png'
@@ -80,8 +74,6 @@ function resolveBuildEditionMeta(rawEdition, { churchName, shortName, descriptio
         'logo.png',
         'pwa-192x192.png',
         'pwa-512x512.png',
-        'pwa-maskable-192x192.png',
-        'pwa-maskable-512x512.png',
         'og-image.png',
         'favicon.ico',
         'apple-touch-icon.png'
@@ -100,11 +92,11 @@ function editionHtmlTransformPlugin(meta) {
       const base = meta.iconBase;
       return html
         .replace(/<title>[\s\S]*?<\/title>/i, `<title>${meta.name}</title>`)
-        .replace(/href="\/logo\.png"/g, `href="${base}/logo.png"`)
-        .replace(/href="\/pwa-192x192\.png"/g, `href="${base}/pwa-192x192.png"`)
-        .replace(/href="\/pwa-512x512\.png"/g, `href="${base}/pwa-512x512.png"`)
-        .replace(/href="\/favicon\.ico"/g, `href="${base}/favicon.ico"`)
-        .replace(/href="\/apple-touch-icon\.png"/g, `href="${base}/apple-touch-icon.png"`)
+        .replace(/href="\/logo\.png(\?v=\d+)?"/g, `href="${base}/logo.png?v=3"`)
+        .replace(/href="\/pwa-192x192\.png(\?v=\d+)?"/g, `href="${base}/pwa-192x192.png?v=3"`)
+        .replace(/href="\/pwa-512x512\.png(\?v=\d+)?"/g, `href="${base}/pwa-512x512.png?v=3"`)
+        .replace(/href="\/favicon\.ico(\?v=\d+)?"/g, `href="${base}/favicon.ico?v=3"`)
+        .replace(/href="\/apple-touch-icon\.png(\?v=\d+)?"/g, `href="${base}/apple-touch-icon.png?v=3"`)
         .replace(/content="\/og-image\.png"/g, `content="${base}/og-image.png"`)
         .replace(/content="#1B2A59"/g, `content="${meta.themeColor}"`);
     }
@@ -211,28 +203,16 @@ export default defineConfig(({ mode }) => {
           lang: 'ar',
           icons: [
             {
-              src: `${editionMeta.iconBase}/pwa-192x192.png`,
+              src: `${editionMeta.iconBase}/pwa-192x192.png?v=3`,
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any'
             },
             {
-              src: `${editionMeta.iconBase}/pwa-512x512.png`,
+              src: `${editionMeta.iconBase}/pwa-512x512.png?v=3`,
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any'
-            },
-            {
-              src: `${editionMeta.iconBase}/pwa-maskable-192x192.png`,
-              sizes: '192x192',
-              type: 'image/png',
-              purpose: 'maskable'
-            },
-            {
-              src: `${editionMeta.iconBase}/pwa-maskable-512x512.png`,
-              sizes: '512x512',
-              type: 'image/png',
-              purpose: 'maskable'
             }
           ]
         },
