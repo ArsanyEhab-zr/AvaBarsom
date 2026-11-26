@@ -855,22 +855,22 @@ export default function Home() {
                     />
                 </div>
 
-                {/* Unified Quick-Access Row (Clean Single-Row Architecture) */}
-                <div className={`grid grid-cols-1 sm:grid-cols-2 ${isMaster ? 'lg:grid-cols-4' : 'md:grid-cols-3'} gap-3 mb-5`}>
+                {/* Unified Quick-Access Grid (Balanced Responsive Cards — Zero Title Clipping) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 mb-5">
                     {isMaster && (
                         <Link
                             to="/master-dashboard"
-                            className="group relative overflow-hidden rounded-2xl bg-gradient-to-br from-amber-500 via-amber-500 to-yellow-600 p-3.5 text-white shadow-md shadow-amber-500/20 border border-amber-300/70 flex items-center justify-between gap-2.5 hover:shadow-lg transition-all tactile-press min-h-[76px]"
+                            className="group relative overflow-hidden rounded-2xl bg-gradient-to-br from-amber-500 via-amber-500 to-yellow-600 p-4 text-white shadow-md shadow-amber-500/20 border border-amber-300/70 flex items-center justify-between gap-3 hover:shadow-lg transition-all tactile-press min-h-[82px]"
                         >
                             <div className="flex items-center gap-3 min-w-0">
-                                <div className="w-10 h-10 rounded-xl bg-white/20 backdrop-blur-sm flex items-center justify-center shrink-0">
+                                <div className="w-11 h-11 rounded-xl bg-white/20 backdrop-blur-sm flex items-center justify-center shrink-0">
                                     <Crown size={20} />
                                 </div>
                                 <div className="min-w-0">
-                                    <h2 className="font-calligraphic text-base sm:text-lg font-bold leading-tight truncate">
+                                    <h2 className="font-calligraphic text-base sm:text-lg font-bold leading-snug">
                                         {isSuperAdmin ? 'لوحة الكاهن الشاملة' : 'لوحة متابعة المرحلة'}
                                     </h2>
-                                    <p className="text-[11px] font-bold text-amber-50 truncate">
+                                    <p className="text-[11px] font-bold text-amber-50 leading-snug mt-0.5">
                                         {isSuperAdmin ? 'مراقبة جميع الأسر' : accessScope.stageName}
                                     </p>
                                 </div>
@@ -879,24 +879,47 @@ export default function Home() {
                         </Link>
                     )}
 
+                    {isMaster && (
+                        <Link
+                            to="/dashboard"
+                            onClick={() => sessionStorage.setItem('dashboard_activeClassKey', 'all')}
+                            className="group coptic-card rounded-2xl p-4 border-2 border-[#C8942E]/75 hover:border-[#1B2A59] flex items-center justify-between gap-3 shadow-sm hover:shadow-md transition-all tactile-press min-h-[82px]"
+                        >
+                            <div className="flex items-center gap-3 min-w-0">
+                                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#1B2A59] to-[#283E80] text-amber-300 border border-amber-400/40 flex items-center justify-center shadow-xs shrink-0">
+                                    <LayoutDashboard size={20} />
+                                </div>
+                                <div className="min-w-0">
+                                    <h3 className="font-calligraphic text-base sm:text-lg font-bold text-[#1B2A59] leading-snug">
+                                        إدارة الأسر والتقارير
+                                    </h3>
+                                    <p className="text-[11px] text-[#6E5329] font-semibold leading-snug mt-0.5">
+                                        تقارير الحضور والغياب، التنبيهات، وبيانات الأسر
+                                    </p>
+                                </div>
+                            </div>
+                            <ChevronRight size={18} className="text-[#1B2A59] shrink-0 rotate-180 group-hover:-translate-x-0.5 transition-transform" />
+                        </Link>
+                    )}
+
                     <Link
                         to="/points"
-                        className="group relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#1B2A59] via-[#1E316A] to-[#111C3D] p-3.5 text-white shadow-md shadow-[#1B2A59]/15 border border-amber-400/35 flex items-center justify-between gap-2.5 hover:shadow-lg transition-all tactile-press min-h-[76px]"
+                        className="group relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#1B2A59] via-[#1E316A] to-[#111C3D] p-4 text-white shadow-md shadow-[#1B2A59]/15 border border-amber-400/35 flex items-center justify-between gap-3 hover:shadow-lg transition-all tactile-press min-h-[82px]"
                     >
                         <div className="flex items-center gap-3 min-w-0">
-                            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-300 to-amber-500 text-[#1B2A59] flex items-center justify-center shadow-sm shrink-0">
+                            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-amber-300 to-amber-500 text-[#1B2A59] flex items-center justify-center shadow-sm shrink-0">
                                 <Trophy size={20} />
                             </div>
                             <div className="min-w-0">
                                 <div className="flex items-center gap-1.5 flex-wrap">
-                                    <h3 className="font-calligraphic text-base sm:text-lg font-bold text-amber-100 leading-tight truncate">
+                                    <h3 className="font-calligraphic text-base sm:text-lg font-bold text-amber-100 leading-snug">
                                         النقاط والمكافآت
                                     </h3>
-                                    <span className="text-[10px] font-bold bg-amber-400/20 text-amber-200 border border-amber-400/30 px-1.5 py-0.5 rounded-full">
+                                    <span className="text-[10px] font-bold bg-amber-400/20 text-amber-200 border border-amber-400/30 px-1.5 py-0.5 rounded-full shrink-0">
                                         {formatArabicMonthKey(pointsShowcase.monthKey)}
                                     </span>
                                 </div>
-                                <p className="text-[11px] text-indigo-100/90 font-semibold truncate">
+                                <p className="text-[11px] text-indigo-100/90 font-semibold leading-snug mt-0.5">
                                     {pointsShowcase.topChild
                                         ? <span className="inline-flex items-center gap-1 max-w-full"><Award size={12} className="text-amber-300 shrink-0" /><span className="truncate">{pointsShowcase.topChild.name} ({pointsShowcase.topChild.totalPoints})</span></span>
                                         : 'لوحة شرف المخدومين'}
@@ -908,22 +931,22 @@ export default function Home() {
 
                     <Link
                         to={isMaster ? '/curriculum' : (activeSyncKey ? `/curriculum?syncKey=${encodeURIComponent(activeSyncKey)}` : '/curriculum')}
-                        className="group coptic-card rounded-2xl p-3.5 flex items-center justify-between gap-2.5 hover:border-amber-500/50 transition-all tactile-press min-h-[76px]"
+                        className="group coptic-card rounded-2xl p-4 flex items-center justify-between gap-3 hover:border-amber-500/50 transition-all tactile-press min-h-[82px]"
                     >
                         <div className="flex items-center gap-3 min-w-0">
-                            <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-800 border border-amber-300/60 flex items-center justify-center shrink-0">
+                            <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-800 border border-amber-300/60 flex items-center justify-center shrink-0">
                                 <BookOpen size={20} />
                             </div>
                             <div className="min-w-0">
-                                <div className="flex items-center gap-1.5">
-                                    <h3 className="font-calligraphic text-base sm:text-lg font-bold text-[#1B2A59] leading-tight truncate">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                    <h3 className="font-calligraphic text-base sm:text-lg font-bold text-[#1B2A59] leading-snug">
                                         {isMaster ? 'منظومة المناهج' : 'منهج الأسرة'}
                                     </h3>
                                     <span className="text-[10px] font-bold bg-indigo-50 text-[#1B2A59] border border-indigo-200/70 px-1.5 py-0.5 rounded-full tabular-nums shrink-0">
                                         {isMaster ? pointsShowcase.totalCurricula : getOsraCurricula(activeSyncKey, allLiveCurricula).length}
                                     </span>
                                 </div>
-                                <p className="text-[11px] text-[#6E5329] font-semibold truncate">
+                                <p className="text-[11px] text-[#6E5329] font-semibold leading-snug mt-0.5">
                                     الكتاب المقدس • العقيدة • الألحان
                                 </p>
                             </div>
@@ -933,17 +956,17 @@ export default function Home() {
 
                     <Link
                         to="/exams"
-                        className="group coptic-card rounded-2xl p-3.5 flex items-center justify-between gap-2.5 hover:border-[#C89B3C] transition-all tactile-press min-h-[76px]"
+                        className="group coptic-card rounded-2xl p-4 flex items-center justify-between gap-3 hover:border-[#C89B3C] transition-all tactile-press min-h-[82px]"
                     >
                         <div className="flex items-center gap-3 min-w-0">
-                            <div className="w-10 h-10 rounded-xl bg-indigo-100 text-[#1B2A59] border border-indigo-200 flex items-center justify-center shrink-0">
+                            <div className="w-11 h-11 rounded-xl bg-indigo-100 text-[#1B2A59] border border-indigo-200 flex items-center justify-center shrink-0">
                                 <Award size={20} />
                             </div>
                             <div className="min-w-0">
-                                <h3 className="font-calligraphic text-base sm:text-lg font-bold text-[#1B2A59] leading-tight truncate">
+                                <h3 className="font-calligraphic text-base sm:text-lg font-bold text-[#1B2A59] leading-snug">
                                     النتائج والامتحانات
                                 </h3>
-                                <p className="text-[11px] text-[#6E5329] font-semibold truncate">
+                                <p className="text-[11px] text-[#6E5329] font-semibold leading-snug mt-0.5">
                                     رصد الدرجات وتقييم المخدومين
                                 </p>
                             </div>

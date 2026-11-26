@@ -103,17 +103,12 @@ export default function Dashboard() {
     const [activeClassKey, setActiveClassKey] = useState(() => {
         if (accessScope.isClassServant) return accessScope.activeSyncKey || '';
         const urlSyncKey = new URLSearchParams(location.search).get('syncKey');
-        if (urlSyncKey) {
+        if (urlSyncKey && urlSyncKey.toLowerCase() !== 'all') {
             sessionStorage.setItem('dashboard_activeClassKey', urlSyncKey);
             return urlSyncKey;
         }
-        try {
-            const savedOsra = JSON.parse(readScopedStorage('selectedOsra') || 'null');
-            if (savedOsra?.syncKey && sessionStorage.getItem('dashboard_activeClassKey')) {
-                return sessionStorage.getItem('dashboard_activeClassKey');
-            }
-        } catch (_e) {}
-        return sessionStorage.getItem('dashboard_activeClassKey') || 'all';
+        sessionStorage.setItem('dashboard_activeClassKey', 'all');
+        return 'all';
     });
 
     useEffect(() => {
@@ -121,9 +116,12 @@ export default function Dashboard() {
         const params = new URLSearchParams(location.search);
         const urlSyncKey = params.get('syncKey');
         const urlView = params.get('view');
-        if (urlSyncKey) {
+        if (urlSyncKey && urlSyncKey.toLowerCase() !== 'all') {
             sessionStorage.setItem('dashboard_activeClassKey', urlSyncKey);
             setActiveClassKey(urlSyncKey);
+        } else {
+            sessionStorage.setItem('dashboard_activeClassKey', 'all');
+            setActiveClassKey('all');
         }
         if (urlView === 'kids' || urlView === 'stats' || urlView === 'reports' || urlView === 'activities') {
             setCurrentView(urlView);
@@ -211,7 +209,7 @@ export default function Dashboard() {
     }, [activeOsraBundle, impersonatedOsra, appSettings.osraLogo]);
 
     const persistClassLogoChange = async (nextLogoUrl, isReset = false) => {
-        if (!scopedCurriculumSyncKey || !Array.isArray(appSettings.services)) return;
+        if (!scopedCurriculumSyncKey || String(scopedCurriculumSyncKey).trim().toLowerCase() === 'all' || !Array.isArray(appSettings.services)) return;
         const updatedServices = appSettings.services.map((svc) => ({
             ...svc,
             osras: (svc.osras || []).map((o) => {
@@ -444,7 +442,7 @@ export default function Dashboard() {
                                         <span className="text-xs font-black text-slate-800 block">تصفية حسب الأسرة / الفصل:</span>
                                         <span className="text-[10px] font-bold text-slate-500">
                                             {validActiveClassKey === 'all'
-                                                ? (isSuperAdmin ? 'عرض شامل لكل الأسر' : `عرض فصول ${accessScope.stageName || 'المرحلة'}`)
+                                                ? (isSuperAdmin ? 'عرض شامل لجميع الأسر والفصول' : `عرض فصول ${accessScope.stageName || 'المرحلة'}`)
                                                 : `محدد: ${allAvailableOsras.find(o => o.syncKey === validActiveClassKey)?.name || validActiveClassKey}`}
                                         </span>
                                     </div>
@@ -458,7 +456,7 @@ export default function Dashboard() {
                                     }}
                                     className="w-full sm:w-auto bg-indigo-50/70 border border-indigo-200 text-indigo-900 font-black text-xs rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shadow-xs"
                                 >
-                                    <option value="all">{isSuperAdmin ? 'كل الأسر (عام)' : `كل فصول ${accessScope.stageName || 'المرحلة'}`}</option>
+                                    <option value="all">{isSuperAdmin ? 'جميع الأسر والفصول' : `جميع فصول ${accessScope.stageName || 'المرحلة'}`}</option>
                                     {allAvailableOsras.map(osra => (
                                         <option key={osra.syncKey} value={osra.syncKey}>
                                             {osra.name} ({osra.serviceName || 'الخدمة'})
@@ -486,8 +484,8 @@ export default function Dashboard() {
                             </div>
                         )}
 
-                        {/* تخصيص شعار الأسرة أو استعادة لوجو الكنيسة الافتراضي */}
-                        {scopedCurriculumSyncKey && activeOsraBundle.osra && (
+                        {/* تخصيص شعار الأسرة أو استعادة لوجو الكنيسة الافتراضي (مخفي تماماً في وضع ALL الشامل) */}
+                        {validActiveClassKey && validActiveClassKey !== 'all' && scopedCurriculumSyncKey && activeOsraBundle.osra && (
                             <div className="mb-4 coptic-card p-3.5 sm:p-4 rounded-3xl border border-[#DFC48F] flex flex-wrap items-center justify-between gap-3">
                                 <div className="flex items-center gap-3 min-w-0">
                                     <div className="w-14 h-14 rounded-2xl bg-[#FFFDF7] border-2 border-[#C89B3C] p-1 flex items-center justify-center shrink-0 overflow-hidden shadow-xs">
@@ -674,11 +672,17 @@ export default function Dashboard() {
                 {currentView === 'kids' && (
                     <KidsManagerView
                         childrenData={children}
-                        activeClassSyncKey={validActiveClassKey !== 'all' ? validActiveClassKey : (impersonatedOsra?.syncKey || accessScope.activeSyncKey || '')}
+                        activeClassSyncKey={
+                            validActiveClassKey !== 'all'
+                                ? validActiveClassKey
+                                : (accessScope.isClassServant ? (accessScope.activeSyncKey || '') : '')
+                        }
                         activeClassOsraName={
-                            allAvailableOsras.find(o => o.syncKey === validActiveClassKey)?.name ||
-                            impersonatedOsra?.name ||
-                            dynamicTitle
+                            validActiveClassKey !== 'all'
+                                ? (allAvailableOsras.find(o => o.syncKey === validActiveClassKey)?.name || validActiveClassKey)
+                                : (accessScope.isClassServant
+                                    ? (impersonatedOsra?.name || dynamicTitle)
+                                    : (isSuperAdmin ? 'جميع الأسر والفصول' : `جميع فصول ${accessScope.stageName || 'المرحلة'}`))
                         }
                     />
                 )}
@@ -1260,10 +1264,15 @@ function KidsManagerView({ childrenData, activeClassSyncKey = '', activeClassOsr
     };
 
     if (isAdding || editingChild) {
-        const activeTargetSyncKey =
+        const sentinelKeys = new Set(['MASTER_ACCESS', 'ADMIN_MODE', 'STAGE_ADMIN', 'all', 'ALL']);
+        const rawCandidate =
             editingChild?.syncKey ||
+            activeClassSyncKey ||
             getImpersonatedOsra()?.syncKey ||
-            readScopedStorage('currentSyncKey');
+            '';
+        const activeTargetSyncKey = sentinelKeys.has(String(rawCandidate).trim())
+            ? ''
+            : String(rawCandidate).trim();
 
         return (
             <StudentFormModal
